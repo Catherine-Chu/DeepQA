@@ -22,14 +22,16 @@ Use python 3
 """
 
 import argparse  # Command line parsing
-# python 2.7  import ConfigParser as configparser  # Saving the models parameters
+# python 2.7  import ConfigParser as configparser
 import configparser  # python 3 Saving the models parameters
 import datetime  # Chronometer
 import os  # Files management
-from tqdm import tqdm  # Progress bar
+import numpy as np
+import math
 import tensorflow as tf
 
-# python3
+from tqdm import tqdm  # Progress bar
+
 from chatbot.textdata import TextData
 from chatbot.model import Model
 
@@ -70,7 +72,7 @@ class Chatbot:
         self.MODEL_NAME_BASE = 'model'
         self.MODEL_EXT = '.ckpt'
         self.CONFIG_FILENAME = 'params.ini'
-        self.CONFIG_VERSION = '0.2'
+        self.CONFIG_VERSION = '0.4'
         self.TEST_IN_NAME = 'data/test/samples.txt'
         self.TEST_OUT_SUFFIX = '_predictions.txt'
         self.SENTENCES_PREFIX = ['Q: ', 'A: ']
@@ -116,9 +118,9 @@ class Chatbot:
 
         # Dataset options
         datasetArgs = parser.add_argument_group('Dataset options')
-        datasetArgs.add_argument('--corpus', type=str, default='cornell',
-                                 help='corpus on which extract the dataset. Only one corpus available right now (Cornell)')
-        datasetArgs.add_argument('--datasetTag', type=str, default=None,
+        datasetArgs.add_argument('--corpus', choices=TextData.corpusChoices(), default=TextData.corpusChoices()[0],
+                                 help='corpus on which extract the dataset.')
+        datasetArgs.add_argument('--datasetTag', type=str, default='',
                                  help='add a tag to the dataset (file where to load the vocabulary and the precomputed samples, not the original corpus). Useful to manage multiple versions')  # The samples are computed from the corpus if it does not exist already. There are saved in \'data/samples/\'
         datasetArgs.add_argument('--ratioDataset', type=float, default=1.0,
                                  help='ratio of dataset used to avoid using the whole dataset')  # Not implemented, useless ?
@@ -130,6 +132,10 @@ class Chatbot:
         nnArgs.add_argument('--hiddenSize', type=int, default=256, help='number of hidden units in each RNN cell')
         nnArgs.add_argument('--numLayers', type=int, default=2, help='number of rnn layers')
         nnArgs.add_argument('--embeddingSize', type=int, default=32, help='embedding size of the word representation')
+        nnArgs.add_argument('--initEmbeddings', action='store_true',
+                            help='if present, the program will initialize the embeddings with pre-trained word2vec vectors')
+        nnArgs.add_argument('--softmaxSamples', type=int, default=0,
+                            help='Number of samples in the sampled softmax loss function. A value of 0 deactivates sampled softmax')
 
         # Training options
         trainingArgs = parser.add_argument_group('Training options')
@@ -138,6 +144,8 @@ class Chatbot:
                                   help='nb of mini-batch step before creating a model checkpoint')
         trainingArgs.add_argument('--batchSize', type=int, default=10, help='mini-batch size')
         trainingArgs.add_argument('--learningRate', type=float, default=0.001, help='Learning rate')
+        trainingArgs.add_argument('--dropout', type=float, default=0.9, help='Dropout rate (keep probabilities)')
+
 
         return parser.parse_args(args)
 
@@ -184,42 +192,42 @@ class Chatbot:
         # Also fix seed for random.shuffle (does it works globally for all files ?)
 
         # Running session
-
+        config = tf.ConfigProto(allow_soft_placement=True)
         # Add by wenjie: limit the gpu
-        config = tf.ConfigProto()
         config.gpu_options.allow_growth = True
-        with tf.Session(config=config) as sess:
-            # TODO: Replace all sess by self.sess (not necessary a good idea) ?
-            self.sess = sess
+        self.sess = tf.Session(config=config)
+        # TODO: Replace all sess by self.sess (not necessary a good idea) ?
 
-            print('Initialize variables...')
-            self.sess.run(tf.global_variables_initializer())
-            # tf0.12 and before:self.sess.run(tf.initialize_all_variables())
+        print('Initialize variables...')
+        self.sess.run(tf.global_variables_initializer())
+        # tf0.12 and before:self.sess.run(tf.initialize_all_variables())
 
-            # Reload the model eventually (if it exist.), on testing mode, the models are not loaded here (but in predictTestset)
-            if self.args.test != Chatbot.TestMode.ALL:
-                self.managePreviousModel(self.sess)
+        # Reload the model eventually (if it exist.), on testing mode, the models are not loaded here (but in predictTestset)
+        if self.args.test != Chatbot.TestMode.ALL:
+            self.managePreviousModel(self.sess)
 
-            if self.args.test:
-                # TODO: For testing, add a mode where instead taking the most likely output after the <go> token,
-                # takes the second or third so it generates new sentences for the same input. Difficult to implement,
-                # probably have to modify the TensorFlow source code
-                if self.args.test == Chatbot.TestMode.INTERACTIVE:
-                    self.mainTestInteractive(self.sess)
-                elif self.args.test == Chatbot.TestMode.ALL:
-                    print('Start predicting...')
-                    self.predictTestset(self.sess)
-                    print('All predictions done')
-                elif self.args.test == Chatbot.TestMode.DAEMON:
-                    print('Daemon mode, running in background...')
-                else:
-                    raise RuntimeError('Unknown test mode: {}'.format(self.args.test))  # Should never happen
+        # Initialize embeddings with pre-trained word2vec vectors
+        if self.args.initEmbeddings:
+            print("Loading pre-trained embeddings from GoogleNews-vectors-negative300.bin")
+            self.loadEmbedding(self.sess)
+
+        if self.args.test:
+            if self.args.test == Chatbot.TestMode.INTERACTIVE:
+                self.mainTestInteractive(self.sess)
+            elif self.args.test == Chatbot.TestMode.ALL:
+                print('Start predicting...')
+                self.predictTestset(self.sess)
+                print('All predictions done')
+            elif self.args.test == Chatbot.TestMode.DAEMON:
+                print('Daemon mode, running in background...')
             else:
-                self.mainTrain(self.sess)
+                raise RuntimeError('Unknown test mode: {}'.format(self.args.test))  # Should never happen
+        else:
+            self.mainTrain(self.sess)
 
-            if self.args.test != Chatbot.TestMode.DAEMON:
-                self.sess.close()
-                print("The End! Thanks for using this program")
+        if self.args.test != Chatbot.TestMode.DAEMON:
+            self.sess.close()
+            print("The End! Thanks for using this program")
 
     def mainTrain(self, sess):
         """ Training loop
@@ -259,14 +267,18 @@ class Chatbot:
                     self.writer.add_summary(summary, self.globStep)
                     self.globStep += 1
 
+                    # Output training status
+                    if self.globStep % 100 == 0:
+                        perplexity = math.exp(float(loss)) if loss < 300 else float("inf")
+                        tqdm.write("----- Step %d -- Loss %.2f -- Perplexity %.2f" % (self.globStep, loss, perplexity))
+
                     # Checkpoint
                     if self.globStep % self.args.saveEvery == 0:
                         self._saveSession(sess)
 
                 toc = datetime.datetime.now()
 
-                print("Epoch finished in {}".format(
-                    toc - tic))  # Warning: Will overflow if an epoch takes more than 24 hours, and the output isn't really nicer
+                print("Epoch finished in {}".format(toc - tic))  # Warning: Will overflow if an epoch takes more than 24 hours, and the output isn't really nicer
         except (KeyboardInterrupt, SystemExit):  # If the user press Ctrl+C while testing progress
             print('Interruption detected, exiting the program...')
 
@@ -389,6 +401,58 @@ class Chatbot:
         self.sess.close()
         print('Daemon closed.')
 
+    def loadEmbedding(self, sess):
+        """ Initialize embeddings with pre-trained word2vec vectors
+        Will modify the embedding weights of the current loaded model
+        Uses the GoogleNews pre-trained values (path hardcoded)
+        """
+
+        # Fetch embedding variables from model
+        with tf.variable_scope("embedding_rnn_seq2seq/rnn/embedding_wrapper", reuse=True):
+            em_in = tf.get_variable("embedding")
+        with tf.variable_scope("embedding_rnn_seq2seq/embedding_rnn_decoder", reuse=True):
+            em_out = tf.get_variable("embedding")
+
+        # Disable training for embeddings
+        variables = tf.get_collection_ref(tf.GraphKeys.TRAINABLE_VARIABLES)
+        variables.remove(em_in)
+        variables.remove(em_out)
+
+        # If restoring a model, we can leave here
+        if self.globStep != 0:
+            return
+
+        # New model, we load the pre-trained word2vec data and initialize embeddings
+        with open(os.path.join(self.args.rootDir, 'data/word2vec/GoogleNews-vectors-negative300.bin'), "rb", 0) as f:
+            header = f.readline()
+            vocab_size, vector_size = map(int, header.split())
+            binary_len = np.dtype('float32').itemsize * vector_size
+            initW = np.random.uniform(-0.25, 0.25, (len(self.textData.word2id), vector_size))
+            for line in tqdm(range(vocab_size)):
+                word = []
+                while True:
+                    ch = f.read(1)
+                    if ch == b' ':
+                        word = b''.join(word).decode('utf-8')
+                        break
+                    if ch != b'\n':
+                        word.append(ch)
+                if word in self.textData.word2id:
+                    initW[self.textData.word2id[word]] = np.fromstring(f.read(binary_len), dtype='float32')
+                else:
+                    f.read(binary_len)
+
+        # PCA Decomposition to reduce word2vec dimensionality
+        if self.args.embeddingSize < vector_size:
+            U, s, Vt = np.linalg.svd(initW, full_matrices=False)
+            S = np.zeros((vector_size, vector_size), dtype=complex)
+            S[:vector_size, :vector_size] = np.diag(s)
+            initW = np.dot(U[:, :self.args.embeddingSize], S[:self.args.embeddingSize, :self.args.embeddingSize])
+
+        # Initialize input and output embeddings
+        sess.run(em_in.assign(initW))
+        sess.run(em_out.assign(initW))
+
     def managePreviousModel(self, sess):
         """ Restore or reset the model, depending of the parameters
         If the destination directory already contains some file, it will handle the conflict as following:
@@ -454,7 +518,8 @@ class Chatbot:
     def _getModelList(self):
         """ Return the list of the model files inside the model directory
         """
-        return [os.path.join(self.modelDir, f[0:f.index('.ckpt')+5]) for f in os.listdir(self.modelDir) if f.endswith(self.MODEL_EXT+'.index')]
+        return [os.path.join(self.modelDir, f[0:f.index('.ckpt') + 5]) for f in os.listdir(self.modelDir) if
+                f.endswith(self.MODEL_EXT + '.index')]
 
     def loadModelParams(self):
         """ Load the some values associated with the current model, like the current globStep value
@@ -488,11 +553,14 @@ class Chatbot:
             self.args.maxLength = config['General'].getint(
                 'maxLength')  # We need to restore the model length because of the textData associated and the vocabulary size (TODO: Compatibility mode between different maxLength)
             self.args.watsonMode = config['General'].getboolean('watsonMode')
+            self.args.corpus = config['General'].get('corpus')
             # self.args.datasetTag = config['General'].get('datasetTag')
 
             self.args.hiddenSize = config['Network'].getint('hiddenSize')
             self.args.numLayers = config['Network'].getint('numLayers')
             self.args.embeddingSize = config['Network'].getint('embeddingSize')
+            self.args.initEmbeddings = config['Network'].getboolean('initEmbeddings')
+            self.args.softmaxSamples = config['Network'].getint('softmaxSamples')
 
             # No restoring for training params, batch size or other non model dependent parameters
 
@@ -502,9 +570,12 @@ class Chatbot:
             print('globStep: {}'.format(self.globStep))
             print('maxLength: {}'.format(self.args.maxLength))
             print('watsonMode: {}'.format(self.args.watsonMode))
+            print('corpus: {}'.format(self.args.corpus))
             print('hiddenSize: {}'.format(self.args.hiddenSize))
             print('numLayers: {}'.format(self.args.numLayers))
             print('embeddingSize: {}'.format(self.args.embeddingSize))
+            print('initEmbeddings: {}'.format(self.args.initEmbeddings))
+            print('softmaxSamples: {}'.format(self.args.softmaxSamples))
             print()
 
         # For now, not arbitrary  independent maxLength between encoder and decoder
@@ -524,16 +595,20 @@ class Chatbot:
         config['General']['globStep'] = str(self.globStep)
         config['General']['maxLength'] = str(self.args.maxLength)
         config['General']['watsonMode'] = str(self.args.watsonMode)
+        config['General']['corpus'] = str(self.args.corpus)
 
         config['Network'] = {}
         config['Network']['hiddenSize'] = str(self.args.hiddenSize)
         config['Network']['numLayers'] = str(self.args.numLayers)
         config['Network']['embeddingSize'] = str(self.args.embeddingSize)
+        config['Network']['initEmbeddings'] = str(self.args.initEmbeddings)
+        config['Network']['softmaxSamples'] = str(self.args.softmaxSamples)
 
         # Keep track of the learning params (but without restoring them)
         config['Training (won\'t be restored)'] = {}
         config['Training (won\'t be restored)']['learningRate'] = str(self.args.learningRate)
         config['Training (won\'t be restored)']['batchSize'] = str(self.args.batchSize)
+        config['Training (won\'t be restored)']['dropout'] = str(self.args.dropout)
 
         with open(os.path.join(self.modelDir, self.CONFIG_FILENAME), 'w') as configFile:
             config.write(configFile)

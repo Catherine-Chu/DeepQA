@@ -26,8 +26,15 @@ import pickle  # Saving the data
 import math  # For float comparison
 import os  # Checking file existance
 import random
+import string
+from collections import OrderedDict
 
-from chatbot.cornelldata import CornellData
+
+from chatbot.corpus.cornelldata import CornellData
+from chatbot.corpus.opensubsdata import OpensubsData
+# from chatbot.corpus.scotusdata import ScotusData
+# from chatbot.corpus.ubuntudata import UbuntuData
+# from chatbot.corpus.lightweightdata import LightweightData
 
 
 class Batch:
@@ -44,6 +51,21 @@ class TextData:
     """Dataset class
     Warning: No vocabulary limit
     """
+    availableCorpus = OrderedDict([  # OrderedDict because the first element is the default choice
+        ('cornell', CornellData),
+        ('opensubs', OpensubsData)
+        # ('scotus', ScotusData),
+        # ('ubuntu', UbuntuData),
+        # ('lightweight', LightweightData),
+    ])
+
+    @staticmethod
+    def corpusChoices():
+        """Return the dataset availables
+        Return:
+            list<string>: the supported corpus
+        """
+        return list(TextData.availableCorpus.keys())
     
     def __init__(self, args):
         """Load all conversations
@@ -54,7 +76,7 @@ class TextData:
         self.args = args
 
         # Path variables
-        self.corpusDir = os.path.join(self.args.rootDir, 'data/cornell/')
+        self.corpusDir = os.path.join(self.args.rootDir, 'data', self.args.corpus)
         self.samplesDir = os.path.join(self.args.rootDir, 'data/samples/')
         self.samplesName = self._constructName()
         
@@ -71,7 +93,7 @@ class TextData:
         self.loadCorpus(self.samplesDir)
 
         # Plot some stats:
-        print('Loaded: {} words, {} QA'.format(len(self.word2id), len(self.trainingSamples)))
+        print('Loaded {}: {} words, {} QA'.format(self.args.corpus, len(self.word2id), len(self.trainingSamples)))
 
         if self.args.playDataset:
             self.playDataset()
@@ -80,23 +102,23 @@ class TextData:
         """Return the name of the dataset that the program should use with the current parameters.
         Computer from the base name, the given tag (self.args.datasetTag) and the sentence length
         """
-        baseName = 'dataset'
+        baseName = 'dataset-{}'.format(self.args.corpus)
         if self.args.datasetTag:
             baseName += '-' + self.args.datasetTag
-        return baseName + '-' + str(self.args.maxLength) + '.pkl'
+        return '{}-{}.pkl'.format(baseName, self.args.maxLength)
 
     def makeLighter(self, ratioDataset):
         """Only keep a small fraction of the dataset, given by the ratio
         """
-        if not math.isclose(ratioDataset, 1.0):
-            self.shuffle()  # Really ?
-            print('WARNING: Ratio feature not implemented !!!')
+        # if not math.isclose(ratioDataset, 1.0):
+        #     self.shuffle()  # Really ?
+        #     print('WARNING: Ratio feature not implemented !!!')
         pass
 
     def shuffle(self):
         """Shuffle the training samples
         """
-        print("Shuffling the dataset...")
+        print('Shuffling the dataset...')
         random.shuffle(self.trainingSamples)
 
     def _createBatch(self, samples):
@@ -216,8 +238,9 @@ class TextData:
         if not datasetExist:  # First time we load the database: creating all files
             print('Training samples not found. Creating dataset...')
             # Corpus creation
-            cornellData = CornellData(self.corpusDir)
-            self.createCorpus(cornellData.getConversations())
+            corpusData = TextData.availableCorpus[self.args.corpus](self.corpusDir + optionnal)
+            self.createCorpus(corpusData.getConversations())
+
             
             # Saving
             print('Saving dataset...')
@@ -277,11 +300,12 @@ class TextData:
     def extractConversation(self, conversation):
         """Extract the sample lines from the conversations
         Args:
-            conversation (Obj): a convesation object containing the lines to extract
+            conversation (Obj): a conversation object containing the lines to extract
         """
             
         # Iterate over all the lines of the conversation
-        for i in range(len(conversation["lines"]) - 1):  # We ignore the last line (no answer for it)
+        for i in tqdm_wrap(range(len(conversation['lines']) - 1),  # We ignore the last line (no answer for it)
+                           desc='Conversation', leave=False):
             inputLine  = conversation["lines"][i]
             targetLine = conversation["lines"][i+1]
             
@@ -393,7 +417,20 @@ class TextData:
         if reverse:  # Reverse means input so no <eos> (otherwise pb with previous early stop)
             sentence.reverse()
 
-        return ' '.join(sentence)
+        return self.detokenize(sentence)
+
+    def detokenize(self, tokens):
+        """Slightly cleaner version of joining with spaces.
+        Args:
+            tokens (list<string>): the sentence to print
+        Return:
+            str: the sentence
+        """
+        return ''.join([
+            ' ' + t if not t.startswith('\'') and
+                       t not in string.punctuation
+                    else t
+            for t in tokens]).strip().capitalize()
 
     def batchSeq2str(self, batchSeq, seqId=0, **kwargs):
         """Convert a list of integer into a human readable string.
@@ -452,8 +489,21 @@ class TextData:
         """
         print('Randomly play samples:')
         for i in range(self.args.playDataset):
-            idSample = random.randint(0, len(self.trainingSamples))
-            print('Q: {}'.format(self.sequence2str(self.trainingSamples[idSample][0])))
-            print('A: {}'.format(self.sequence2str(self.trainingSamples[idSample][1])))
+            idSample = random.randint(0, len(self.trainingSamples) - 1)
+            print('Q: {}'.format(self.sequence2str(self.trainingSamples[idSample][0], clean=True)))
+            print('A: {}'.format(self.sequence2str(self.trainingSamples[idSample][1], clean=True)))
             print()
         pass
+
+def tqdm_wrap(iterable, *args, **kwargs):
+    """Forward an iterable eventually wrapped around a tqdm decorator
+    The iterable is only wrapped if the iterable contains enough elements
+    Args:
+        iterable (list): An iterable object which define the __len__ method
+        *args, **kwargs: the tqdm parameters
+    Return:
+        iter: The iterable eventually decorated
+    """
+    if len(iterable) > 100:
+        return tqdm(iterable, *args, **kwargs)
+    return iterable

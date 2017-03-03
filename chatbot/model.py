@@ -25,6 +25,51 @@ import tensorflow as tf
 from chatbot.textdata import Batch
 
 
+class ProjectionOp:
+    """ Single layer perceptron
+    Project input tensor on the output dimension
+    """
+
+    def __init__(self, shape, scope=None, dtype=None):
+        """
+        Args:
+            shape: a tuple (input dim, output dim)
+            scope (str): encapsulate variables
+            dtype: the weights type
+        """
+        assert len(shape) == 2
+
+        self.scope = scope
+
+        # Projection on the keyboard
+        with tf.variable_scope('weights_' + self.scope):
+            self.W = tf.get_variable(
+                'weights',
+                shape,
+                # initializer=tf.truncated_normal_initializer()  # TODO: Tune value (fct of input size: 1/sqrt(input_dim))
+                dtype=dtype
+            )
+            self.b = tf.get_variable(
+                'bias',
+                shape[1],
+                initializer=tf.constant_initializer(),
+                dtype=dtype
+            )
+
+    def getWeights(self):
+        """ Convenience method for some tf arguments
+        """
+        return self.W, self.b
+
+    def __call__(self, X):
+        """ Project the output of the decoder into the vocabulary space
+        Args:
+            X (tf.Tensor): input value
+        """
+        with tf.name_scope(self.scope):
+            return tf.matmul(X, self.W) + self.b
+
+
 class Model:
     """
     Implementation of a seq2seq model.
@@ -42,6 +87,7 @@ class Model:
 
         self.textData = textData  # Keep a reference on the dataset
         self.args = args  # Keep track of the parameters of the model
+        self.dtype = tf.float32
 
         # Placeholders
         self.encoderInputs = None
@@ -64,18 +110,61 @@ class Model:
         # TODO: Create name_scopes (for better graph visualisation)
         # TODO: Use buckets (better perfs)
 
-        # Creation of the rnn cell
-        with tf.variable_scope("chatbot_cell"):  # TODO: How to make this appear on the graph ?
+        # Parameters of sampled softmax (needed for attention mechanism and a large vocabulary size)
+        outputProjection = None
+        # Sampled softmax only makes sense if we sample less than vocabulary size.
+        if 0 < self.args.softmaxSamples < self.textData.getVocabularySize():
+            outputProjection = ProjectionOp(
+                (self.args.hiddenSize, self.textData.getVocabularySize()),
+                scope='softmax_projection',
+                dtype=self.dtype
+            )
 
-            encoDecoCell = tf.contrib.rnn.BasicLSTMCell(self.args.hiddenSize,
-                                                        state_is_tuple=True)  # Or GRUCell, LSTMCell(args.hiddenSize)
-            # tf0.12 and before :encoDecoCell = tf.nn.rnn_cell.BasicLSTMCell(self.args.hiddenSize, state_is_tuple=True)  # Or GRUCell, LSTMCell(args.hiddenSize)
-            # encoDecoCell = tf.nn.rnn_cell.DropoutWrapper(encoDecoCell, input_keep_prob=1.0, output_keep_prob=1.0)  # TODO: Custom values (WARNING: No dropout when testing !!!)
-            # tf0.12 and before :encoDecoCell = tf.nn.rnn_cell.MultiRNNCell([encoDecoCell] * self.args.numLayers, state_is_tuple=True)
-            encoDecoCell = tf.contrib.rnn.MultiRNNCell([encoDecoCell] * self.args.numLayers, state_is_tuple=True)
+            def sampledSoftmax(labels, inputs):
+                labels = tf.reshape(labels, [-1, 1])  # Add one dimension (nb of true classes, here 1)
+
+                # We need to compute the sampled_softmax_loss using 32bit floats to
+                # avoid numerical instabilities.
+                localWt = tf.cast(tf.transpose(outputProjection.W), tf.float32)
+                localB = tf.cast(outputProjection.b, tf.float32)
+                localInputs = tf.cast(inputs, tf.float32)
+
+                return tf.cast(
+                    tf.nn.sampled_softmax_loss(
+                        localWt,  # Should have shape [num_classes, dim]
+                        localB,
+                        labels,
+                        localInputs,
+                        self.args.softmaxSamples,  # The number of classes to randomly sample per batch
+                        self.textData.getVocabularySize()),  # The number of classes
+                    self.dtype)
+
+        # Creation of the rnn cell
+        def create_rnn_cell():
+            encoDecoCell = tf.contrib.rnn.BasicLSTMCell(  # Or GRUCell, LSTMCell(args.hiddenSize)
+                self.args.hiddenSize,
+            )
+            if not self.args.test:  # TODO: Should use a placeholder instead
+                encoDecoCell = tf.contrib.rnn.DropoutWrapper(
+                    encoDecoCell,
+                    input_keep_prob=1.0,
+                    output_keep_prob=self.args.dropout
+                )
+            return encoDecoCell
+
+        encoDecoCell = tf.contrib.rnn.MultiRNNCell(
+            [create_rnn_cell() for _ in range(self.args.numLayers)],
+        )
 
         # Network input (placeholders)
 
+        # tensor的shape参数为一个张量，张量的阶可以理解为维数；
+        # 0维[]表示纯量，即数；1维[i]表示向量，如[2]=>[3,9]；2维[i,j]表示矩阵，如[2,3]=>[[1,2,3],[4,5,6]]
+        # None表示任意大小，空表示???表示0维即纯量，那[None,]和[None]是否一样呢？
+        # 经实验证明[3,]与[3]完全一致，故推断[None,]与[None]含义相同，比较此处与tesorflow官方代码可知传入embedding_attention的参数类型
+        # 几乎没有任何不同，说明之前关于数据维度过大导致显存内存占用剧增的推断应该不正确
+        # 那么下一个不同的地方就是target的赋值，官方代码中target做了左偏移，后来又补充一位；
+        # 还有一个不同是是否使用bucket，但是根据目前的了解使用只会提高运算速度，不应该可以减少内存占用？？？？这个问题很疑惑
         with tf.name_scope('placeholder_encoder'):
             self.encoderInputs = [tf.placeholder(tf.int32, [None, ]) for _ in
                                   range(self.args.maxLengthEnco)]  # Batch size * sequence length * input dim
@@ -104,15 +193,22 @@ class Model:
             num_decoder_symbols=self.textData.getVocabularySize(),
             # Both encoder and decoder have the same number of class
             embedding_size=self.args.embeddingSize,  # Dimension of each word
-            output_projection=None,  # Eventually
+            output_projection=outputProjection.getWeights() if outputProjection else None,
             feed_previous=bool(self.args.test)
             # When we test (self.args.test), we use previous output as next input (feed_previous)
         )
 
+        # TODO: When the LSTM hidden size is too big, we should project the LSTM output into a smaller space (4086 => 2046): Should speed up
+        # training and reduce memory usage. Other solution, use sampling softmax
+
         # For testing only
         if self.args.test:
-            self.outputs = decoderOutputs
-            # TODO: Attach a summary to visualize the output
+            if not outputProjection:
+                self.outputs = decoderOutputs
+            else:
+                self.outputs = [outputProjection(output) for output in decoderOutputs]
+
+                # TODO: Attach a summary to visualize the output
 
         # For training only
         else:
@@ -120,9 +216,13 @@ class Model:
             # tf0.12 and before:self.lossFct = tf.nn.seq2seq.sequence_loss(decoderOutputs, self.decoderTargets,
             #                                                        self.decoderWeights,
             #                                                        self.textData.getVocabularySize())
-            self.lossFct = tf.contrib.legacy_seq2seq.sequence_loss(decoderOutputs, self.decoderTargets,
-                                                                   self.decoderWeights,
-                                                                   self.textData.getVocabularySize())
+            self.lossFct = tf.contrib.legacy_seq2seq.sequence_loss(
+                decoderOutputs,
+                self.decoderTargets,
+                self.decoderWeights,
+                self.textData.getVocabularySize(),
+                softmax_loss_function=sampledSoftmax if outputProjection else None  # If None, use default SoftMax
+            )
             tf.summary.scalar('loss', self.lossFct)  # Keep track of the cost
             # tf0.12 and before:tf.scalar_summary('loss', self.lossFct)  # Keep track of the cost
 
