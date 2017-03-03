@@ -21,6 +21,7 @@ Train the program by launching it with random parametters
 
 from tqdm import tqdm
 import os
+import random
 
 
 def main():
