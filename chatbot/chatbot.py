@@ -554,7 +554,7 @@ class Chatbot:
                 'maxLength')  # We need to restore the model length because of the textData associated and the vocabulary size (TODO: Compatibility mode between different maxLength)
             self.args.watsonMode = config['General'].getboolean('watsonMode')
             self.args.corpus = config['General'].get('corpus')
-            # self.args.datasetTag = config['General'].get('datasetTag')
+            self.args.datasetTag = config['General'].get('datasetTag', '')
 
             self.args.hiddenSize = config['Network'].getint('hiddenSize')
             self.args.numLayers = config['Network'].getint('numLayers')
@@ -571,6 +571,7 @@ class Chatbot:
             print('maxLength: {}'.format(self.args.maxLength))
             print('watsonMode: {}'.format(self.args.watsonMode))
             print('corpus: {}'.format(self.args.corpus))
+            print('datasetTag: {}'.format(self.args.datasetTag))
             print('hiddenSize: {}'.format(self.args.hiddenSize))
             print('numLayers: {}'.format(self.args.numLayers))
             print('embeddingSize: {}'.format(self.args.embeddingSize))
@@ -596,6 +597,7 @@ class Chatbot:
         config['General']['maxLength'] = str(self.args.maxLength)
         config['General']['watsonMode'] = str(self.args.watsonMode)
         config['General']['corpus'] = str(self.args.corpus)
+        config['General']['datasetTag'] = str(self.args.datasetTag)
 
         config['Network'] = {}
         config['Network']['hiddenSize'] = str(self.args.hiddenSize)

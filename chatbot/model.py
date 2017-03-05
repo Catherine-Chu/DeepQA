@@ -182,9 +182,15 @@ class Model:
         # Define the network
         # Here we use an embedding model, it takes integer as input and convert them into word vector for
         # better word representation
+
         # original system use embedding method only and can be improved by using attention, which could
-        # improve the ability on longer sentences
-        # decoderOutputs, states = tf.nn.seq2seq.embedding_rnn_seq2seq(   ***embedding_attention_seq2seq
+        # improve the ability on longer sentences predictions.  *** embedding_attention_seq2seq ***
+
+        # 注意如果要改成embedding_attention_seq2seq,其使用get_variable创建的变量name会不同（因为scope不同），直接运行
+        # 会报错：ValueError: Variable embedding_rnn_seq2seq/rnn/embedding_wrapper/embedding does not exist,
+        # or was not created with tf.get_variable(). Did you mean to set reuse=None in VarScope?
+        # 即initEmbedding操作时reuse的变量不存在，应该加一个useAttention参数，并判断参数进行initEmbedding处的embedding
+        # resign操作
         decoderOutputs, states = tf.contrib.legacy_seq2seq.embedding_rnn_seq2seq(
             self.encoderInputs,  # List<[batch=?, inputDim=1]>, list of size args.maxLength
             self.decoderInputs,  # For training, we force the correct output (feed_previous=False)

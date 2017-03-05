@@ -234,21 +234,27 @@ class TextData:
         datasetExist = False
         if os.path.exists(os.path.join(dirName, self.samplesName)):
             datasetExist = True
-        
+
         if not datasetExist:  # First time we load the database: creating all files
             print('Training samples not found. Creating dataset...')
+
+            optionnal = ''
+            if self.args.corpus == 'lightweight' and not self.args.datasetTag:
+                raise ValueError('Use the --datasetTag to define the lightweight file to use.')
+            else:
+                optionnal = '/' + self.args.datasetTag  # HACK: Forward the filename
+
             # Corpus creation
             corpusData = TextData.availableCorpus[self.args.corpus](self.corpusDir + optionnal)
             self.createCorpus(corpusData.getConversations())
 
-            
             # Saving
             print('Saving dataset...')
             self.saveDataset(dirName)  # Saving tf samples
         else:
             print('Loading dataset from {}...'.format(dirName))
             self.loadDataset(dirName)
-        
+
         assert self.padToken == 0
         
     def saveDataset(self, dirName):
