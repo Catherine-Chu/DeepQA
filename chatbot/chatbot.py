@@ -136,6 +136,8 @@ class Chatbot:
                             help='if present, the program will initialize the embeddings with pre-trained word2vec vectors')
         nnArgs.add_argument('--softmaxSamples', type=int, default=0,
                             help='Number of samples in the sampled softmax loss function. A value of 0 deactivates sampled softmax')
+        nnArgs.add_argument('--useAttentions', action='store_true',
+                            help='if present, the program will use attention mechanism')
 
         # Training options
         trainingArgs = parser.add_argument_group('Training options')
@@ -145,7 +147,6 @@ class Chatbot:
         trainingArgs.add_argument('--batchSize', type=int, default=10, help='mini-batch size')
         trainingArgs.add_argument('--learningRate', type=float, default=0.001, help='Learning rate')
         trainingArgs.add_argument('--dropout', type=float, default=0.9, help='Dropout rate (keep probabilities)')
-
 
         return parser.parse_args(args)
 
@@ -166,7 +167,9 @@ class Chatbot:
 
         # tf.logging.set_verbosity(tf.logging.INFO) # DEBUG, INFO, WARN (default), ERROR, or FATAL
 
-        self.loadModelParams()  # Update the self.modelDir and self.globStep, for now, not used when loading Model (but need to be called before _getSummaryName)
+        self.loadModelParams()
+        # Update the self.modelDir and self.globStep, for now, not used when loading Model
+        # (but need to be called before _getSummaryName)
 
         self.textData = TextData(self.args)
         # TODO: Add a mode where we can force the input of the decoder // Try to visualize the predictions for
@@ -202,9 +205,19 @@ class Chatbot:
         self.sess.run(tf.global_variables_initializer())
         # tf0.12 and before:self.sess.run(tf.initialize_all_variables())
 
-        # Reload the model eventually (if it exist.), on testing mode, the models are not loaded here (but in predictTestset)
+        # Reload the model eventually (if it exist.), on testing mode,
+        # the models are not loaded here (but in predictTestset)
         if self.args.test != Chatbot.TestMode.ALL:
             self.managePreviousModel(self.sess)
+
+        # Use attention mechanism in model by creating embedding_attention model
+        if self.args.useAttentions:
+            print('Using attention mechanism in model')
+            if self.args.softmaxSamples == 0:
+                print('Warning: Use attention mechanism without softmax samples '
+                      'requires larger memory space and may raise OOM exception.')
+                print('Recommend to rerun the program and train the model '
+                      'with softmaxSamples and useAttentions arguments')
 
         # Initialize embeddings with pre-trained word2vec vectors
         if self.args.initEmbeddings:
@@ -278,7 +291,8 @@ class Chatbot:
 
                 toc = datetime.datetime.now()
 
-                print("Epoch finished in {}".format(toc - tic))  # Warning: Will overflow if an epoch takes more than 24 hours, and the output isn't really nicer
+                print("Epoch finished in {}".format(
+                    toc - tic))  # Warning: Will overflow if an epoch takes more than 24 hours, and the output isn't really nicer
         except (KeyboardInterrupt, SystemExit):  # If the user press Ctrl+C while testing progress
             print('Interruption detected, exiting the program...')
 
@@ -408,10 +422,16 @@ class Chatbot:
         """
 
         # Fetch embedding variables from model
-        with tf.variable_scope("embedding_rnn_seq2seq/rnn/embedding_wrapper", reuse=True):
-            em_in = tf.get_variable("embedding")
-        with tf.variable_scope("embedding_rnn_seq2seq/embedding_rnn_decoder", reuse=True):
-            em_out = tf.get_variable("embedding")
+        if self.args.useAttentions:
+            with tf.variable_scope("embedding_attention_seq2seq/rnn/embedding_wrapper", reuse=True):
+                em_in = tf.get_variable("embedding")
+            with tf.variable_scope("embedding_attention_seq2seq/embedding_attention_decoder", reuse=True):
+                em_out = tf.get_variable("embedding")
+        else:
+            with tf.variable_scope("embedding_rnn_seq2seq/rnn/embedding_wrapper", reuse=True):
+                em_in = tf.get_variable("embedding")
+            with tf.variable_scope("embedding_rnn_seq2seq/embedding_rnn_decoder", reuse=True):
+                em_out = tf.get_variable("embedding")
 
         # Disable training for embeddings
         variables = tf.get_collection_ref(tf.GraphKeys.TRAINABLE_VARIABLES)
@@ -561,6 +581,7 @@ class Chatbot:
             self.args.embeddingSize = config['Network'].getint('embeddingSize')
             self.args.initEmbeddings = config['Network'].getboolean('initEmbeddings')
             self.args.softmaxSamples = config['Network'].getint('softmaxSamples')
+            self.args.useAttentions = config['Network'].getboolean('useAttentions')
 
             # No restoring for training params, batch size or other non model dependent parameters
 
@@ -577,6 +598,7 @@ class Chatbot:
             print('embeddingSize: {}'.format(self.args.embeddingSize))
             print('initEmbeddings: {}'.format(self.args.initEmbeddings))
             print('softmaxSamples: {}'.format(self.args.softmaxSamples))
+            print('useAttentions: {}'.format(self.args.useAttentions))
             print()
 
         # For now, not arbitrary  independent maxLength between encoder and decoder
@@ -605,6 +627,7 @@ class Chatbot:
         config['Network']['embeddingSize'] = str(self.args.embeddingSize)
         config['Network']['initEmbeddings'] = str(self.args.initEmbeddings)
         config['Network']['softmaxSamples'] = str(self.args.softmaxSamples)
+        config['Network']['useAttentions'] = str(self.args.useAttentions)
 
         # Keep track of the learning params (but without restoring them)
         config['Training (won\'t be restored)'] = {}

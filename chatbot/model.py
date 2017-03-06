@@ -191,22 +191,43 @@ class Model:
         # or was not created with tf.get_variable(). Did you mean to set reuse=None in VarScope?
         # 即initEmbedding操作时reuse的变量不存在，应该加一个useAttention参数，并判断参数进行initEmbedding处的embedding
         # resign操作
-        decoderOutputs, states = tf.contrib.legacy_seq2seq.embedding_rnn_seq2seq(
-            self.encoderInputs,  # List<[batch=?, inputDim=1]>, list of size args.maxLength
-            self.decoderInputs,  # For training, we force the correct output (feed_previous=False)
-            encoDecoCell,
-            num_encoder_symbols=self.textData.getVocabularySize(),
-            num_decoder_symbols=self.textData.getVocabularySize(),
-            # Both encoder and decoder have the same number of class
-            embedding_size=self.args.embeddingSize,  # Dimension of each word
-            output_projection=outputProjection.getWeights() if outputProjection else None,
-            feed_previous=bool(self.args.test)
-            # When we test (self.args.test), we use previous output as next input (feed_previous)
-        )
+
+        if not self.args.useAttentions:
+            decoderOutputs, states = tf.contrib.legacy_seq2seq.embedding_rnn_seq2seq(
+                self.encoderInputs,  # List<[batch=?, inputDim=1]>, list of size args.maxLength
+                self.decoderInputs,  # For training, we force the correct output (feed_previous=False)
+                encoDecoCell,
+                num_encoder_symbols=self.textData.getVocabularySize(),
+                num_decoder_symbols=self.textData.getVocabularySize(),
+                # Both encoder and decoder have the same number of class
+                embedding_size=self.args.embeddingSize,  # Dimension of each word
+                output_projection=outputProjection.getWeights() if outputProjection else None,
+                feed_previous=bool(self.args.test)
+                # When we test (self.args.test), we use previous output as next input (feed_previous)
+            )
+        else:
+            # Enable attentions mechanism, solve the problem of oom. Maybe could be solved by using buckets model.
+            # Or maybe the problem is that inputs in a batch don't have the same length, that means we forgot the
+            # padding operations, so that the dynamic model can't handle it. The bucket model can improve performance
+            # by clustering the inputs which have similar length together. And it isn't necessary if we are not concern
+            # about speed.
+            # 在textdata里_createBatch中做了padding操作，问题就不在这里了。
+            # 找到问题所在，attention必须配合Sampled softmax使用，可设置sample数目为256，可以明显看到计算速度比无attention机制时慢但是
+            # 可以像tf官方model一样运行。
+            decoderOutputs, states = tf.contrib.legacy_seq2seq.embedding_attention_seq2seq(
+                self.encoderInputs,
+                self.decoderInputs,
+                encoDecoCell,
+                num_encoder_symbols=self.textData.getVocabularySize(),
+                num_decoder_symbols=self.textData.getVocabularySize(),
+                embedding_size=self.args.embeddingSize,
+                output_projection=outputProjection.getWeights() if outputProjection else None,
+                feed_previous=bool(self.args.test),
+                dtype=self.dtype
+            )
 
         # TODO: When the LSTM hidden size is too big, we should project the LSTM output into a smaller space (4086 => 2046): Should speed up
         # training and reduce memory usage. Other solution, use sampling softmax
-
         # For testing only
         if self.args.test:
             if not outputProjection:
@@ -265,6 +286,7 @@ class Model:
 
             ops = (self.optOp, self.lossFct)
         else:  # Testing (batchSize == 1)
+
             for i in range(self.args.maxLengthEnco):
                 feedDict[self.encoderInputs[i]] = batch.encoderSeqs[i]
             feedDict[self.decoderInputs[0]] = [self.textData.goToken]

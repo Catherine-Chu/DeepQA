@@ -29,9 +29,10 @@ import random
 import string
 from collections import OrderedDict
 
-
 from chatbot.corpus.cornelldata import CornellData
 from chatbot.corpus.opensubsdata import OpensubsData
+
+
 # from chatbot.corpus.scotusdata import ScotusData
 # from chatbot.corpus.ubuntudata import UbuntuData
 # from chatbot.corpus.lightweightdata import LightweightData
@@ -40,6 +41,7 @@ from chatbot.corpus.opensubsdata import OpensubsData
 class Batch:
     """Struct containing batches info
     """
+
     def __init__(self):
         self.encoderSeqs = []
         self.decoderSeqs = []
@@ -66,7 +68,7 @@ class TextData:
             list<string>: the supported corpus
         """
         return list(TextData.availableCorpus.keys())
-    
+
     def __init__(self, args):
         """Load all conversations
         Args:
@@ -79,17 +81,17 @@ class TextData:
         self.corpusDir = os.path.join(self.args.rootDir, 'data', self.args.corpus)
         self.samplesDir = os.path.join(self.args.rootDir, 'data/samples/')
         self.samplesName = self._constructName()
-        
+
         self.padToken = -1  # Padding
         self.goToken = -1  # Start of sequence
         self.eosToken = -1  # End of sequence
         self.unknownToken = -1  # Word dropped from vocabulary
-        
+
         self.trainingSamples = []  # 2d array containing each question and his answer [[input,target]]
-        
+
         self.word2id = {}
         self.id2word = {}  # For a rapid conversion
-        
+
         self.loadCorpus(self.samplesDir)
 
         # Plot some stats:
@@ -141,19 +143,25 @@ class TextData:
             sample = samples[i]
             if not self.args.test and self.args.watsonMode:  # Watson mode: invert question and answer
                 sample = list(reversed(sample))
-            batch.encoderSeqs.append(list(reversed(sample[0])))  # Reverse inputs (and not outputs), little trick as defined on the original seq2seq paper
+            batch.encoderSeqs.append(list(reversed(
+                sample[0])))  # Reverse inputs (and not outputs), little trick as defined on the original seq2seq paper
             batch.decoderSeqs.append([self.goToken] + sample[1] + [self.eosToken])  # Add the <go> and <eos> tokens
-            batch.targetSeqs.append(batch.decoderSeqs[-1][1:])  # Same as decoder, but shifted to the left (ignore the <go>)
+            batch.targetSeqs.append(
+                batch.decoderSeqs[-1][1:])  # Same as decoder, but shifted to the left (ignore the <go>)
 
             # Long sentences should have been filtered during the dataset creation
             assert len(batch.encoderSeqs[i]) <= self.args.maxLengthEnco
             assert len(batch.decoderSeqs[i]) <= self.args.maxLengthDeco
 
             # Add padding & define weight
-            batch.encoderSeqs[i]   = [self.padToken] * (self.args.maxLengthEnco  - len(batch.encoderSeqs[i])) + batch.encoderSeqs[i]  # Left padding for the input
-            batch.weights.append([1.0] * len(batch.targetSeqs[i]) + [0.0] * (self.args.maxLengthDeco - len(batch.targetSeqs[i])))
-            batch.decoderSeqs[i] = batch.decoderSeqs[i] + [self.padToken] * (self.args.maxLengthDeco - len(batch.decoderSeqs[i]))
-            batch.targetSeqs[i]  = batch.targetSeqs[i]  + [self.padToken] * (self.args.maxLengthDeco - len(batch.targetSeqs[i]))
+            batch.encoderSeqs[i] = [self.padToken] * (self.args.maxLengthEnco - len(batch.encoderSeqs[i])) + \
+                                   batch.encoderSeqs[i]  # Left padding for the input
+            batch.weights.append(
+                [1.0] * len(batch.targetSeqs[i]) + [0.0] * (self.args.maxLengthDeco - len(batch.targetSeqs[i])))
+            batch.decoderSeqs[i] = batch.decoderSeqs[i] + [self.padToken] * (
+                self.args.maxLengthDeco - len(batch.decoderSeqs[i]))
+            batch.targetSeqs[i] = batch.targetSeqs[i] + [self.padToken] * (
+                self.args.maxLengthDeco - len(batch.targetSeqs[i]))
 
         # Simple hack to reshape the batch
         encoderSeqsT = []  # Corrected orientation
@@ -195,15 +203,18 @@ class TextData:
             list<Batch>: Get a list of the batches for the next epoch
         """
         self.shuffle()
-        
+
         batches = []
 
         def genNextSamples():
             """ Generator over the mini-batch training samples
             """
-            # 关于samples的大小需要研究一下
             for i in range(0, self.getSampleSize(), self.args.batchSize):
+                # i取0-SampleSize中的值，循环间取值间隔为batchSize
                 yield self.trainingSamples[i:min(i + self.args.batchSize, self.getSampleSize())]
+                # 取trainingSamples集合中i->j的数据，j为i+batchSize和SampleSize中较小的值，只有在取最后一组数据时，
+                # 可能剩余的总数据数小于batchsize，那么就取到最大SampleSize即可
+
         # samples为一组qa对，大小由batchSize和getSampleSize返回值两个参数决定
         for samples in genNextSamples():
             # 一个batch（也就是一次性训练数据量）由一个samples，即一组qa对组成
@@ -211,21 +222,21 @@ class TextData:
             # batches包含所有数据，是batch的集合，依次训练即可，将batches训练完就遍历了一遍数据
             batches.append(batch)
         return batches
-    
+
     def getSampleSize(self):
         """Return the size of the dataset
         Return:
             int: Number of training samples
         """
         return len(self.trainingSamples)
-    
+
     def getVocabularySize(self):
         """Return the number of words present in the dataset
         Return:
             int: Number of word on the loader corpus
         """
         return len(self.word2id)
-        
+
     def loadCorpus(self, dirName):
         """Load/create the conversations data
         Args:
@@ -256,19 +267,19 @@ class TextData:
             self.loadDataset(dirName)
 
         assert self.padToken == 0
-        
+
     def saveDataset(self, dirName):
         """Save samples to file
         Args:
             dirName (str): The directory where to load/save the model
         """
-        
+
         with open(os.path.join(dirName, self.samplesName), 'wb') as handle:
             data = {  # Warning: If adding something here, also modifying loadDataset
                 "word2id": self.word2id,
                 "id2word": self.id2word,
                 "trainingSamples": self.trainingSamples
-                }
+            }
             pickle.dump(data, handle, -1)  # Using the highest protocol available
 
     def loadDataset(self, dirName):
@@ -281,7 +292,7 @@ class TextData:
             self.word2id = data["word2id"]
             self.id2word = data["id2word"]
             self.trainingSamples = data["trainingSamples"]
-            
+
             self.padToken = self.word2id["<pad>"]
             self.goToken = self.word2id["<go>"]
             self.eosToken = self.word2id["<eos>"]
@@ -295,29 +306,29 @@ class TextData:
         self.goToken = self.getWordId("<go>")  # Start of sequence
         self.eosToken = self.getWordId("<eos>")  # End of sequence
         self.unknownToken = self.getWordId("<unknown>")  # Word dropped from vocabulary
-        
+
         # Preprocessing data
 
         for conversation in tqdm(conversations, desc="Extract conversations"):
             self.extractConversation(conversation)
 
-        # The dataset will be saved in the same order it has been extracted
+            # The dataset will be saved in the same order it has been extracted
 
     def extractConversation(self, conversation):
         """Extract the sample lines from the conversations
         Args:
             conversation (Obj): a conversation object containing the lines to extract
         """
-            
+
         # Iterate over all the lines of the conversation
         for i in tqdm_wrap(range(len(conversation['lines']) - 1),  # We ignore the last line (no answer for it)
                            desc='Conversation', leave=False):
-            inputLine  = conversation["lines"][i]
-            targetLine = conversation["lines"][i+1]
-            
-            inputWords  = self.extractText(inputLine["text"])
+            inputLine = conversation["lines"][i]
+            targetLine = conversation["lines"][i + 1]
+
+            inputWords = self.extractText(inputLine["text"])
             targetWords = self.extractText(targetLine["text"], True)
-            
+
             if inputWords and targetWords:  # Filter wrong samples (if one of the list is empty)
                 self.trainingSamples.append([inputWords, targetWords])
 
@@ -339,7 +350,7 @@ class TextData:
             # If question: we only keep the last sentences
             # If answer: we only keep the first sentences
             if not isTarget:
-                i = len(sentencesToken)-1 - i
+                i = len(sentencesToken) - 1 - i
 
             tokens = nltk.word_tokenize(sentencesToken[i])
 
@@ -373,7 +384,7 @@ class TextData:
 
         # Get the id if the word already exist
         wordId = self.word2id.get(word, -1)
-        
+
         # If not, we create a new entry
         if wordId == -1:
             if create:
@@ -382,7 +393,7 @@ class TextData:
                 self.id2word[wordId] = word
             else:
                 wordId = self.unknownToken
-        
+
         return wordId
 
     def printBatch(self, batch):
@@ -395,7 +406,8 @@ class TextData:
             print('Encoder: {}'.format(self.batchSeq2str(batch.encoderSeqs, seqId=i)))
             print('Decoder: {}'.format(self.batchSeq2str(batch.decoderSeqs, seqId=i)))
             print('Targets: {}'.format(self.batchSeq2str(batch.targetSeqs, seqId=i)))
-            print('Weights: {}'.format(' '.join([str(weight) for weight in [batchWeight[i] for batchWeight in batch.weights]])))
+            print('Weights: {}'.format(
+                ' '.join([str(weight) for weight in [batchWeight[i] for batchWeight in batch.weights]])))
 
     def sequence2str(self, sequence, clean=False, reverse=False):
         """Convert a list of integer into a human readable string
@@ -433,10 +445,10 @@ class TextData:
             str: the sentence
         """
         return ''.join([
-            ' ' + t if not t.startswith('\'') and
-                       t not in string.punctuation
-                    else t
-            for t in tokens]).strip().capitalize()
+                           ' ' + t if not t.startswith('\'') and
+                                      t not in string.punctuation
+                           else t
+                           for t in tokens]).strip().capitalize()
 
     def batchSeq2str(self, batchSeq, seqId=0, **kwargs):
         """Convert a list of integer into a human readable string.
@@ -500,6 +512,7 @@ class TextData:
             print('A: {}'.format(self.sequence2str(self.trainingSamples[idSample][1], clean=True)))
             print()
         pass
+
 
 def tqdm_wrap(iterable, *args, **kwargs):
     """Forward an iterable eventually wrapped around a tqdm decorator
