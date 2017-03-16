@@ -268,6 +268,7 @@ class Model:
         Does not perform run on itself but just return the operators to do so. Those have then to be run
         Args:
             batch (Batch): Input data on testing mode, input and target on output mode
+            vld: validation flag
         Return:
             (ops), dict: A tuple of the (training, loss) operators or (outputs,) in testing mode with the associated feed dictionary
         """

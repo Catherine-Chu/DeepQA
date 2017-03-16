@@ -88,6 +88,8 @@ class TextData:
         self.unknownToken = -1  # Word dropped from vocabulary
 
         self.trainingSamples = []  # 2d array containing each question and his answer [[input,target]]
+        self.validatingSamples = []  # 2d array containing each question and his answer [[input,target]]
+
 
         self.word2id = {}
         self.id2word = {}  # For a rapid conversion
@@ -95,7 +97,8 @@ class TextData:
         self.loadCorpus(self.samplesDir)
 
         # Plot some stats:
-        print('Loaded {}: {} words, {} QA'.format(self.args.corpus, len(self.word2id), len(self.trainingSamples)))
+        print('Loaded {} : {} words, {} QA in training set'.format(self.args.corpus, len(self.word2id), len(self.trainingSamples)))
+        # print('Loaded {} : {} words, {} QA in validating set'.format(self.args.corpus, len(self.word2id), len(self.validatingSamples)))
 
         if self.args.playDataset:
             self.playDataset()
@@ -120,8 +123,14 @@ class TextData:
     def shuffle(self):
         """Shuffle the training samples
         """
-        print('Shuffling the dataset...')
+        print('Shuffling the training set...')
         random.shuffle(self.trainingSamples)
+
+    def vld_shuffle(self):
+        """Shuffle the validating samples
+        """
+        print('Shuffling the validating set...')
+        random.shuffle(self.validatingSamples)
 
     def _createBatch(self, samples):
         """Create a single batch from the list of sample. The batch size is automatically defined by the number of
@@ -197,28 +206,41 @@ class TextData:
 
         return batch
 
-    def getBatches(self):
+    def getBatches(self, validate=False):
         """Prepare the batches for the current epoch
         Return:
             list<Batch>: Get a list of the batches for the next epoch
         """
-        self.shuffle()
+        if not validate:
+            self.shuffle()
+        else:
+            if not len(self.validatingSamples)==0:
+                self.validatingSamples.clear()
+            self.validatingSamples.extend(random.sample(self.trainingSamples, 2000))
+            self.vld_shuffle()
 
         batches = []
 
-        def genNextSamples():
+        def genNextSamples(vld):
             """ Generator over the mini-batch training samples
             """
-            for i in range(0, self.getSampleSize(), self.args.batchSize):
-                # i取0-SampleSize中的值，循环间取值间隔为batchSize
-                yield self.trainingSamples[i:min(i + self.args.batchSize, self.getSampleSize())]
-                # 取trainingSamples集合中i->j的数据，j为i+batchSize和SampleSize中较小的值，只有在取最后一组数据时，
-                # 可能剩余的总数据数小于batchsize，那么就取到最大SampleSize即可
+            if not vld:
+                for i in range(0, self.getSampleSize(), self.args.batchSize):
+                    # i取0-SampleSize中的值，循环间取值间隔为batchSize
+                    yield self.trainingSamples[i:min(i + self.args.batchSize, self.getSampleSize())]
+                    # 取trainingSamples集合中i->j的数据，j为i+batchSize和SampleSize中较小的值，只有在取最后一组数据时，
+                    # 可能剩余的总数据数小于batchsize，那么就取到最大SampleSize即可
+            else:
+                for i in range(0, self.getValidateSampleSize(), 1):
+                    yield self.validatingSamples[i:min(i + 1, self.getValidateSampleSize())]
 
         # samples为一组qa对，大小由batchSize和getSampleSize返回值两个参数决定
-        for samples in genNextSamples():
+        for samples in genNextSamples(validate):
             # 一个batch（也就是一次性训练数据量）由一个samples，即一组qa对组成
-            batch = self._createBatch(samples)
+            if not validate:
+                batch = self._createBatch(samples)
+            else:
+                batch = samples[0]
             # batches包含所有数据，是batch的集合，依次训练即可，将batches训练完就遍历了一遍数据
             batches.append(batch)
         return batches
@@ -229,6 +251,13 @@ class TextData:
             int: Number of training samples
         """
         return len(self.trainingSamples)
+
+    def getValidateSampleSize(self):
+        """Return the size of the dataset
+        Return:
+            int: Number of training samples
+        """
+        return len(self.validatingSamples)
 
     def getVocabularySize(self):
         """Return the number of words present in the dataset
@@ -278,7 +307,8 @@ class TextData:
             data = {  # Warning: If adding something here, also modifying loadDataset
                 "word2id": self.word2id,
                 "id2word": self.id2word,
-                "trainingSamples": self.trainingSamples
+                "trainingSamples": self.trainingSamples,
+                # "validatingSamples": self.validatingSamples
             }
             pickle.dump(data, handle, -1)  # Using the highest protocol available
 
@@ -292,6 +322,7 @@ class TextData:
             self.word2id = data["word2id"]
             self.id2word = data["id2word"]
             self.trainingSamples = data["trainingSamples"]
+            # self.validatingSamples = data['validatingSamples']
 
             self.padToken = self.word2id["<pad>"]
             self.goToken = self.word2id["<go>"]
@@ -308,11 +339,10 @@ class TextData:
         self.unknownToken = self.getWordId("<unknown>")  # Word dropped from vocabulary
 
         # Preprocessing data
-
         for conversation in tqdm(conversations, desc="Extract conversations"):
             self.extractConversation(conversation)
-
             # The dataset will be saved in the same order it has been extracted
+        # self.validatingSamples.extend(random.sample(self.trainingSamples, 2000))
 
     def extractConversation(self, conversation):
         """Extract the sample lines from the conversations

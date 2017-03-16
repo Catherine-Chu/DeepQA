@@ -29,8 +29,10 @@ import os  # Files management
 import numpy as np
 import math
 import tensorflow as tf
+import nltk
 
 from tqdm import tqdm  # Progress bar
+from nltk.translate import bleu_score
 
 from chatbot.textdata import TextData
 from chatbot.model import Model
@@ -72,6 +74,7 @@ class Chatbot:
         self.MODEL_NAME_BASE = 'model'
         self.MODEL_EXT = '.ckpt'
         self.CONFIG_FILENAME = 'params.ini'
+        self.PERFORMANCE_FILENAME = 'performance.log'
         self.CONFIG_VERSION = '0.4'
         self.TEST_IN_NAME = 'data/test/samples.txt'
         self.TEST_OUT_SUFFIX = '_predictions.txt'
@@ -142,7 +145,7 @@ class Chatbot:
         # Training options
         trainingArgs = parser.add_argument_group('Training options')
         trainingArgs.add_argument('--numEpochs', type=int, default=30, help='maximum number of epochs to run')
-        trainingArgs.add_argument('--saveEvery', type=int, default=1000,
+        trainingArgs.add_argument('--saveEvery', type=int, default=1400,
                                   help='nb of mini-batch step before creating a model checkpoint')
         trainingArgs.add_argument('--batchSize', type=int, default=10, help='mini-batch size')
         trainingArgs.add_argument('--learningRate', type=float, default=0.001, help='Learning rate')
@@ -261,11 +264,14 @@ class Chatbot:
 
         print('Start training (press Ctrl+C to save and exit)...')
 
+        perfFile=open(os.path.join(self.modelDir, self.PERFORMANCE_FILENAME), 'w')
+
         try:  # If the user exit while training, we still try to save the model
             for e in range(self.args.numEpochs):
 
                 print()
                 print("----- Epoch {}/{} ; (lr={}) -----".format(e + 1, self.args.numEpochs, self.args.learningRate))
+                perfFile.write("----- Epoch {}/{} -----".format(e + 1, self.args.numEpochs)+"\n")
 
                 batches = self.textData.getBatches()
 
@@ -281,22 +287,57 @@ class Chatbot:
                     self.globStep += 1
 
                     # Output training status
-                    if self.globStep % 100 == 0:
+                    if self.globStep % 200 == 0:
                         perplexity = math.exp(float(loss)) if loss < 300 else float("inf")
                         tqdm.write("----- Step %d -- Loss %.2f -- Perplexity %.2f" % (self.globStep, loss, perplexity))
+                        perfFile.write("----- Step %d -- Loss %.2f -- Perplexity %.2f\n" % (self.globStep, loss, perplexity))
 
                     # Checkpoint
                     if self.globStep % self.args.saveEvery == 0:
                         self._saveSession(sess)
 
+                # *************************************************************************
+                # Calculating BLEU score on random validation set with size k
+                self.args.test = True
+                vldBatches = self.textData.getBatches(validate=True)
+                average_bleu = 0
+                refs = []
+                hyps = []
+                for vldbatch in tqdm(vldBatches, desc="Validating"):
+                    assert len(vldbatch) == 2
+                    inputSeqs = vldbatch[0]
+                    targetSeqs = vldbatch[1]
+                    question = self.textData.sequence2str(self.textData.deco2sentence(inputSeqs),
+                                                          clean=True)
+                    answer = self.singlePredict(question)
+                    ref = self.textData.sequence2str(answer, clean=True).split()
+                    refs.append([ref])
+                    hyp = self.textData.sequence2str(self.textData.deco2sentence(targetSeqs),
+                                                     clean=True).split()
+                    hyps.append(hyp)
+                    bleu = bleu_score.sentence_bleu([ref], hyp)
+                    average_bleu += bleu
+                average_bleu /= len(self.textData.validatingSamples)
+                corpus_bleu = bleu_score.corpus_bleu(refs, hyps)
+                tqdm.write(
+                    "----- Epoch %d -- Average BLEU %.4f -- Corpus BLEU %.4f" % (e, average_bleu, corpus_bleu))
+                perfFile.write("----- Epoch %d -- Average BLEU %.4f -- Corpus BLEU %.4f\n" % (e, average_bleu, corpus_bleu))
+                self.args.test = False
+                # ************************************************************************
                 toc = datetime.datetime.now()
 
                 print("Epoch finished in {}".format(
-                    toc - tic))  # Warning: Will overflow if an epoch takes more than 24 hours, and the output isn't really nicer
+                    toc - tic))
+                # Warning: Will overflow if an epoch takes more than 24 hours, and the output isn't really nicer
+                perfFile.write("Epoch finished in {}".format(
+                    toc - tic))
         except (KeyboardInterrupt, SystemExit):  # If the user press Ctrl+C while testing progress
             print('Interruption detected, exiting the program...')
 
         self._saveSession(sess)  # Ultimate saving before complete exit
+
+        perfFile.flush()
+        perfFile.close()
 
     def predictTestset(self, sess):
         """ Try predicting the sentences from the samples.txt file.
