@@ -87,9 +87,11 @@ class TextData:
         self.eosToken = -1  # End of sequence
         self.unknownToken = -1  # Word dropped from vocabulary
 
-        self.trainingSamples = []  # 2d array containing each question and his answer [[input,target]]
-        self.validatingSamples = []  # 2d array containing each question and his answer [[input,target]]
-
+        # 2d array containing each question and his answer [[input,target]]
+        self.trainingSamples = []  # train set
+        self.validatingSamples = []  # validate set used to calculate evaluation score on train samples
+        self.developSamples = []  # development set used to choose best parameters and re-training
+        self.testSamples = []  # test set
 
         self.word2id = {}
         self.id2word = {}  # For a rapid conversion
@@ -98,7 +100,6 @@ class TextData:
 
         # Plot some stats:
         print('Loaded {} : {} words, {} QA in training set'.format(self.args.corpus, len(self.word2id), len(self.trainingSamples)))
-        # print('Loaded {} : {} words, {} QA in validating set'.format(self.args.corpus, len(self.word2id), len(self.validatingSamples)))
 
         if self.args.playDataset:
             self.playDataset()
@@ -214,7 +215,7 @@ class TextData:
         if not validate:
             self.shuffle()
         else:
-            if not len(self.validatingSamples)==0:
+            if not len(self.validatingSamples) == 0:
                 self.validatingSamples.clear()
             self.validatingSamples.extend(random.sample(self.trainingSamples, 2000))
             self.vld_shuffle()
@@ -225,14 +226,14 @@ class TextData:
             """ Generator over the mini-batch training samples
             """
             if not vld:
-                for i in range(0, self.getSampleSize(), self.args.batchSize):
+                for i in range(0, self.getSampleSize()[0], self.args.batchSize):
                     # i取0-SampleSize中的值，循环间取值间隔为batchSize
-                    yield self.trainingSamples[i:min(i + self.args.batchSize, self.getSampleSize())]
+                    yield self.trainingSamples[i:min(i + self.args.batchSize, self.getSampleSize()[0])]
                     # 取trainingSamples集合中i->j的数据，j为i+batchSize和SampleSize中较小的值，只有在取最后一组数据时，
                     # 可能剩余的总数据数小于batchsize，那么就取到最大SampleSize即可
             else:
-                for i in range(0, self.getValidateSampleSize(), 1):
-                    yield self.validatingSamples[i:min(i + 1, self.getValidateSampleSize())]
+                for i in range(0, self.getSampleSize()[1], 1):
+                    yield self.validatingSamples[i:min(i + 1, self.getSampleSize()[1])]
 
         # samples为一组qa对，大小由batchSize和getSampleSize返回值两个参数决定
         for samples in genNextSamples(validate):
@@ -248,16 +249,10 @@ class TextData:
     def getSampleSize(self):
         """Return the size of the dataset
         Return:
-            int: Number of training samples
+            list: Size of 4 type samples set, 0 for train, 1 for validate, 2 for develop, 3 for test
         """
-        return len(self.trainingSamples)
-
-    def getValidateSampleSize(self):
-        """Return the size of the dataset
-        Return:
-            int: Number of training samples
-        """
-        return len(self.validatingSamples)
+        sample_size = [len(self.trainingSamples), len(self.validatingSamples), len(self.developSamples), len(self.testSamples)]
+        return sample_size
 
     def getVocabularySize(self):
         """Return the number of words present in the dataset
@@ -286,6 +281,7 @@ class TextData:
 
             # Corpus creation
             corpusData = TextData.availableCorpus[self.args.corpus](self.corpusDir + optionnal)
+
             self.createCorpus(corpusData.getConversations())
 
             # Saving
@@ -339,10 +335,14 @@ class TextData:
         self.unknownToken = self.getWordId("<unknown>")  # Word dropped from vocabulary
 
         # Preprocessing data
-        for conversation in tqdm(conversations, desc="Extract conversations"):
-            self.extractConversation(conversation)
-            # The dataset will be saved in the same order it has been extracted
-        # self.validatingSamples.extend(random.sample(self.trainingSamples, 2000))
+        if not self.args.historyInputs:
+            for conversation in tqdm(conversations, desc="Extract conversations"):
+                self.extractConversation(conversation)
+                # The dataset will be saved in the same order it has been extracted
+            # self.validatingSamples.extend(random.sample(self.trainingSamples, 2000))
+        else:
+            for conversation in tqdm(conversations, desc="Extract conversations"):
+                self.extractHistoryConversation(conversation)
 
     def extractConversation(self, conversation):
         """Extract the sample lines from the conversations
@@ -355,6 +355,24 @@ class TextData:
                            desc='Conversation', leave=False):
             inputLine = conversation["lines"][i]
             targetLine = conversation["lines"][i + 1]
+
+            inputWords = self.extractText(inputLine["text"])
+            targetWords = self.extractText(targetLine["text"], True)
+
+            if inputWords and targetWords:  # Filter wrong samples (if one of the list is empty)
+                self.trainingSamples.append([inputWords, targetWords])
+
+    def extractHistoryConversation(self, conversation):
+        """Extract the sample lines from the conversations
+        Args:
+            conversation (Obj): a conversation object containing the lines to extract
+        """
+        # TODO 1: Check the correctness
+        # Iterate over all the lines of the conversation
+        for i in tqdm_wrap(range(len(conversation['lines'])-2),
+                           desc='Conversation', leave=False):
+            inputLine = conversation["lines"][i]+' '+conversation["lines"][i + 1]
+            targetLine = conversation["lines"][i + 2]
 
             inputWords = self.extractText(inputLine["text"])
             targetWords = self.extractText(targetLine["text"], True)
@@ -388,6 +406,7 @@ class TextData:
             if len(words) + len(tokens) <= self.args.maxLength:
                 tempWords = []
                 for token in tokens:
+                    # TODO 1: create vocabulary  in limited size
                     tempWords.append(self.getWordId(token))  # Create the vocabulary and the training sentences
 
                 if isTarget:
@@ -409,7 +428,7 @@ class TextData:
             int: the id of the word created
         """
         # Should we Keep only words with more than one occurrence ?
-
+        # TODO 1: create vocabulary  in limited size
         word = word.lower()  # Ignore case
 
         # Get the id if the word already exist
@@ -529,7 +548,7 @@ class TextData:
         # Choose the words with the highest prediction score
         for out in decoderOutputs:
             sequence.append(np.argmax(out))  # Adding each predicted word ids
-
+            # 每一个out代表一个位置(共12个，10+<go>+<eos>)的预测矩阵（矩阵大小对应词表大小），np.argmax选择矩阵中最大概率的词,并返回其下标即word ids
         return sequence  # We return the raw sentence. Let the caller do some cleaning eventually
 
     def playDataset(self):

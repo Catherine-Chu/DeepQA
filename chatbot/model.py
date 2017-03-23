@@ -21,6 +21,7 @@ Model to predict the next sentence given an input sequence
 """
 
 import tensorflow as tf
+import heapq
 
 from chatbot.textdata import Batch
 
@@ -46,7 +47,8 @@ class ProjectionOp:
             self.W = tf.get_variable(
                 'weights',
                 shape,
-                # initializer=tf.truncated_normal_initializer()  # TODO: Tune value (fct of input size: 1/sqrt(input_dim))
+                # initializer=tf.truncated_normal_initializer()
+                # TODO 3: Tune value (fct of input size: 1/sqrt(input_dim))
                 dtype=dtype
             )
             self.b = tf.get_variable(
@@ -98,7 +100,13 @@ class Model:
         # Main operators
         self.lossFct = None
         self.optOp = None
+        self.mmiOp = None
+        self.mmiReward = None
         self.outputs = None  # Outputs of the network, list of probability for each words
+
+        # SGD optimizer track
+        self.gradient_norms = []
+        self.updates = []
 
         # Construct the graphs
         self.buildNetwork()
@@ -107,8 +115,8 @@ class Model:
         """ Create the computational graph
         """
 
-        # TODO: Create name_scopes (for better graph visualisation)
-        # TODO: Use buckets (better perfs)
+        # TODO 3: Create name_scopes (for better graph visualisation)
+        # TODO 2: Use buckets (better perfs), learning the short/easy sentence first, with shuffling inside buckets instead of global
 
         # Parameters of sampled softmax (needed for attention mechanism and a large vocabulary size)
         outputProjection = None
@@ -144,7 +152,7 @@ class Model:
             encoDecoCell = tf.contrib.rnn.BasicLSTMCell(  # Or GRUCell, LSTMCell(args.hiddenSize)
                 self.args.hiddenSize,
             )
-            if not self.args.test:  # TODO: Should use a placeholder instead
+            if not self.args.test:  # TODO 3: Should use a placeholder instead
                 encoDecoCell = tf.contrib.rnn.DropoutWrapper(
                     encoDecoCell,
                     input_keep_prob=1.0,
@@ -226,17 +234,15 @@ class Model:
                 dtype=self.dtype
             )
 
-        # TODO: When the LSTM hidden size is too big, we should project the LSTM output into a smaller space (4086 => 2046): Should speed up
-        # training and reduce memory usage. Other solution, use sampling softmax
-        # For testing only
+        # TODO 3: When the LSTM hidden size is too big, we should project the LSTM output into a smaller space (4086 => 2046)
+        # Purpose: Should speed up training and reduce memory usage
+        # Other solution, use sampling softmax For testing only
         if self.args.test:
             if not outputProjection:
                 self.outputs = decoderOutputs
             else:
                 self.outputs = [outputProjection(output) for output in decoderOutputs]
-
-                # TODO: Attach a summary to visualize the output
-
+                # TODO 3: Attach a summary to visualize the output
         # For training only
         else:
             # Finally, we define the loss function
@@ -250,18 +256,55 @@ class Model:
                 self.textData.getVocabularySize(),
                 softmax_loss_function=sampledSoftmax if outputProjection else None  # If None, use default SoftMax
             )
+
             tf.summary.scalar('loss', self.lossFct)  # Keep track of the cost
             # tf0.12 and before:tf.scalar_summary('loss', self.lossFct)  # Keep track of the cost
 
             # Initialize the optimizer
             opt = tf.train.AdamOptimizer(
                 # 此处使用的优化算法与官方模型中不同，官方模型使用随机梯度下降方法GradientDescentOptimizer
+                # Adam相较于SGD是更优的优化器
                 learning_rate=self.args.learningRate,
                 beta1=0.9,
                 beta2=0.999,
                 epsilon=1e-08
             )
+
             self.optOp = opt.minimize(self.lossFct)
+
+            if self.args.train == 'mutualinfo':
+                def computeMI(decoCan, encoIn):
+                    miscore = float()
+                    return miscore
+
+                if not outputProjection:
+                    self.outputs = decoderOutputs
+                else:
+                    self.outputs = [outputProjection(output) for output in decoderOutputs]
+
+                # TODO 1：直接继续定义lossfct2（应该说是改变里面的输入输出和weight参数指代，调用的可能还是tf.contrib.*）
+                convReward = [tf.reduce_mean([computeMI(decoderCandidate, self.encoderInputs[convId])
+                                              for decoderCandidate in self.decoder2Nbest(self.outputs[convId], self.args.mmiN)])
+                              for convId in range(len(self.outputs))]
+                # 一个batch的数据做一次综合Reward计算（类似上面的sequence loss吧虽然也不知道上面的sequence loss是不是这个意思）
+                self.mmiReward = tf.reduce_mean(convReward)
+                # TODO 1：修改summary的内容，summary应该是主要用于可视化的，具体作用不清楚，包括writer好像也是
+                # 看一下scalar函数能不能重复赋值，是覆盖还是添加，想一下如果可视化的话在不同mode下是不是直接覆盖就可以，在上面扩大了graph的
+                # 情况下，如果summary只添加一个loss function会不会不匹配而报错，或者直接先去掉可视化扩展相关的部分？
+                tf.summary.scalar('mmi_reward', self.mmiReward)
+
+                params = tf.trainable_variables()
+                opt1 = tf.train.GradientDescentOptimizer(
+                    self.args.learningRate
+                )
+                gradients = tf.gradients(self.mmiReward, params)
+                clipped_gradients, norm = tf.clip_by_global_norm(gradients,
+                                                                 self.args.maxGradientNorm)
+                self.gradient_norms.append(norm)
+                self.updates.append(opt1.apply_gradients(
+                    zip(clipped_gradients, params)))
+
+                self.mmiOp = opt1.minimize(-self.mmiReward)
 
     def step(self, batch):
         """ Forward/training step operation.
@@ -284,8 +327,10 @@ class Model:
                 feedDict[self.decoderInputs[i]] = batch.decoderSeqs[i]
                 feedDict[self.decoderTargets[i]] = batch.targetSeqs[i]
                 feedDict[self.decoderWeights[i]] = batch.weights[i]
-
-            ops = (self.optOp, self.lossFct)
+            if not self.args.train == 'matualinfo':
+                ops = (self.optOp, self.lossFct)
+            else:
+                ops = (self.mmiOp, self.mmiReward)
         else:  # Testing (batchSize == 1)
 
             for i in range(self.args.maxLengthEnco):
@@ -296,3 +341,49 @@ class Model:
 
         # Return one pass operator
         return ops, feedDict
+
+    def decoder2Nbest(self, decoderOutputs, N):
+        """Decode the output of the decoder and return a human friendly sentence
+                decoderOutputs (list<np.array>):
+                """
+        sequences = []
+        candidate_seqs = []
+        # Choose the words with the N-best prediction score
+
+        # for out in decoderOutputs:
+        #     n_best_w = heapq.nlargest(N, range(len(out)), out.take)
+        #     for j in range(N):
+        #         sequences[j].append(n_best_w[j])
+
+        # Beam Search是搜索，利用评分（比如loss，reward）来搜索，不是利用概率最大来搜索，这里生成N-best可以借鉴一下
+        n_best_w = []
+        n_best_logit = []
+        for out in decoderOutputs:
+            n_best_w.append(heapq.nlargest(N, range(len(out)), out.take))
+            n_best_logit.append([out[x] for x in n_best_w[len(n_best_w)-1]])
+
+        logits = [1]
+        paths = [[]]
+        pos = 0
+        for candidate_words in n_best_logit:
+            logits1 = []
+            paths1 = []
+            for ws in range(len(candidate_words)):
+                for mul in range(len(logits)):
+                    logits1.append(candidate_words[ws] * logits[mul])
+                    a = []
+                    a.extend(paths[mul])
+                    paths1.append(a.append(n_best_w[pos][ws]))
+                    a.clear()
+            logits.clear()
+            paths.clear()
+            logits.extend(logits1)
+            paths.extend(paths1)
+            logits1.clear()
+            paths1.clear()
+            pos += 1
+        k = heapq.nlargest(N, range(len(logits)), logits.take)
+        for t in range(k):
+            sequences.append(paths[t])
+        return sequences
+

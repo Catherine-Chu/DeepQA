@@ -50,6 +50,13 @@ class Chatbot:
         INTERACTIVE = 'interactive'  # The user can write his own questions
         DAEMON = 'daemon'  # The chatbot runs on background and can regularly be called to predict something
 
+    class TrainMode:
+        """ Simple structure representing the different RL training methods
+        """
+        SEQ2SEQ = 'seq2seq'
+        MUTUALINFO ='mutualinfo'
+        REINFORCEMENT = 'reinforcement'
+
     def __init__(self):
         """
         """
@@ -99,6 +106,14 @@ class Chatbot:
                                 help='if present, launch the program try to answer all sentences from data/test/ with'
                                      ' the defined model(s), in interactive mode, the user can wrote his own sentences,'
                                      ' use daemon mode to integrate the chatbot in another program')
+        globalArgs.add_argument('--train',
+                                nargs='?',
+                                choices=[Chatbot.TrainMode.SEQ2SEQ, Chatbot.TrainMode.MUTUALINFO, Chatbot.TrainMode.REINFORCEMENT],
+                                const=Chatbot.TrainMode.SEQ2SEQ, default=None,
+                                help='if present, launch the program try to train the model based on pre-trained model(s)(if exist);'
+                                     'in seq2seq mode, train the model with default method;'
+                                     'in multualinfo mode, train the model with multual information score object function;'
+                                     'in reinforcement mode, train the model with reinforcement method between 2 agent')
         globalArgs.add_argument('--createDataset', action='store_true',
                                 help='if present, the program will only generate the dataset from the corpus (no training/testing)')
         globalArgs.add_argument('--playDataset', type=int, nargs='?', const=10, default=None,
@@ -108,7 +123,7 @@ class Chatbot:
         globalArgs.add_argument('--verbose', action='store_true',
                                 help='When testing, will plot the outputs at the same time they are computed')
         globalArgs.add_argument('--keepAll', action='store_true',
-                                help='If this option is set, all saved model will be keep (Warning: make sure you have enough free disk space or increase saveEvery)')  # TODO: Add an option to delimit the max size
+                                help='If this option is set, all saved model will be keep (Warning: make sure you have enough free disk space or increase saveEvery)')  # TODO 3: Add an option to delimit the max size
         globalArgs.add_argument('--modelTag', type=str, default=None,
                                 help='tag to differentiate which model to store/load')
         globalArgs.add_argument('--rootDir', type=str, default=None,
@@ -129,12 +144,20 @@ class Chatbot:
                                  help='ratio of dataset used to avoid using the whole dataset')  # Not implemented, useless ?
         datasetArgs.add_argument('--maxLength', type=int, default=10,
                                  help='maximum length of the sentence (for input and output), define number of maximum step of the RNN')
+        datasetArgs.add_argument('--holdout', type=int, default=0,
+                                 help='if 0, use whole data set as train set;'
+                                      'if 1, use 3/4 data set as train set and 1/4 as test set;'
+                                      'if 2, use 1/2 data set ad train set, 1/4 as development set and 1/4 as test set')
+        # TODO 1: Implement holdout choice
+        datasetArgs.add_argument('--historyInputs', action='store_true',
+                                 help='if present, concatenate the previous 2 sentences as input, and next sentence as target')
 
         # Network options (Warning: if modifying something here, also make the change on save/loadParams() )
         nnArgs = parser.add_argument_group('Network options', 'architecture related option')
         nnArgs.add_argument('--hiddenSize', type=int, default=256, help='number of hidden units in each RNN cell')
         nnArgs.add_argument('--numLayers', type=int, default=2, help='number of rnn layers')
         nnArgs.add_argument('--embeddingSize', type=int, default=32, help='embedding size of the word representation')
+        # TODO 2: Change fixed embedding to word2vec model with trained initial parameters
         nnArgs.add_argument('--initEmbeddings', action='store_true',
                             help='if present, the program will initialize the embeddings with pre-trained word2vec vectors')
         nnArgs.add_argument('--softmaxSamples', type=int, default=0,
@@ -150,6 +173,8 @@ class Chatbot:
         trainingArgs.add_argument('--batchSize', type=int, default=10, help='mini-batch size')
         trainingArgs.add_argument('--learningRate', type=float, default=0.001, help='Learning rate')
         trainingArgs.add_argument('--dropout', type=float, default=0.9, help='Dropout rate (keep probabilities)')
+        trainingArgs.add_argument('--mmiN', type=int, default=10, help='MMI model n-best parameter N')
+        trainingArgs.add_argument('--maxGradientNorm', type=float, default=5.0, help='Clip gradients to this norm in SGD optimizer')
 
         return parser.parse_args(args)
 
@@ -175,11 +200,7 @@ class Chatbot:
         # (but need to be called before _getSummaryName)
 
         self.textData = TextData(self.args)
-        # TODO: Add a mode where we can force the input of the decoder // Try to visualize the predictions for
-        # each word of the vocabulary / decoder input
-        # TODO: For now, the model are trained for a specific dataset (because of the maxLength which define the
-        # vocabulary). Add a compatibility mode which allow to launch a model trained on a different vocabulary (
-        # remap the word2id/id2word variables).
+
         if self.args.createDataset:
             print('Dataset created! Thanks for using this program')
             return  # No need to go further
@@ -192,17 +213,11 @@ class Chatbot:
         # tf0.12 and before:self.writer = tf.train.SummaryWriter(self._getSummaryName())
         self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=200)  # Arbitrary limit ?
 
-        # TODO: Fixed seed (WARNING: If dataset shuffling, make sure to do that after saving the
-        # dataset, otherwise, all which cames after the shuffling won't be replicable when
-        # reloading the dataset). How to restore the seed after loading ??
-        # Also fix seed for random.shuffle (does it works globally for all files ?)
-
         # Running session
         config = tf.ConfigProto(allow_soft_placement=True)
         # Add by wenjie: limit the gpu
         config.gpu_options.allow_growth = True
         self.sess = tf.Session(config=config)
-        # TODO: Replace all sess by self.sess (not necessary a good idea) ?
 
         print('Initialize variables...')
         self.sess.run(tf.global_variables_initializer())
@@ -211,6 +226,7 @@ class Chatbot:
         # Reload the model eventually (if it exist.), on testing mode,
         # the models are not loaded here (but in predictTestset)
         if self.args.test != Chatbot.TestMode.ALL:
+            # 不使用--test参数时self.args.test为None，即所有train过程model restore均是在managePreciousModel中完成的
             self.managePreviousModel(self.sess)
 
         # Use attention mechanism in model by creating embedding_attention model
@@ -238,8 +254,17 @@ class Chatbot:
                 print('Daemon mode, running in background...')
             else:
                 raise RuntimeError('Unknown test mode: {}'.format(self.args.test))  # Should never happen
+        elif self.args.train:
+            if self.args.train == Chatbot.TrainMode.SEQ2SEQ:
+                self.mainTrain(self.sess)
+            elif self.args.train == Chatbot.TrainMode.MUTUALINFO:
+                self.miTrain(self.sess)
+            elif self.args.train == Chatbot.TrainMode.REINFORCEMENT:
+                self.rlTrain(self.sess)
+            else:
+                raise RuntimeError('Unknown train mode: {}'.format(self.args.train))  # Should never happen
         else:
-            self.mainTrain(self.sess)
+            print('Warning: Unknown program state, you need to use either --train or --test argument.')  # Should never happen
 
         if self.args.test != Chatbot.TestMode.DAEMON:
             self.sess.close()
@@ -262,20 +287,20 @@ class Chatbot:
 
         # If restoring a model, restore the progression bar ? and current batch ?
 
-        print('Start training (press Ctrl+C to save and exit)...')
+        print('Start seq2seq model training (press Ctrl+C to save and exit)...')
 
-        perfFile=open(os.path.join(self.modelDir, self.PERFORMANCE_FILENAME), 'w')
+        perfFile = open(os.path.join(self.modelDir, self.PERFORMANCE_FILENAME), 'w')
 
         try:  # If the user exit while training, we still try to save the model
             for e in range(self.args.numEpochs):
 
                 print()
                 print("----- Epoch {}/{} ; (lr={}) -----".format(e + 1, self.args.numEpochs, self.args.learningRate))
-                perfFile.write("----- Epoch {}/{} -----".format(e + 1, self.args.numEpochs)+"\n")
+                perfFile.write("----- Epoch {}/{} -----".format(e + 1, self.args.numEpochs) + "\n")
 
                 batches = self.textData.getBatches()
 
-                # TODO: Also update learning parameters eventually
+                # TODO 2: Also update learning parameters eventually
 
                 tic = datetime.datetime.now()
                 for nextBatch in tqdm(batches, desc="Training"):
@@ -290,14 +315,15 @@ class Chatbot:
                     if self.globStep % 200 == 0:
                         perplexity = math.exp(float(loss)) if loss < 300 else float("inf")
                         tqdm.write("----- Step %d -- Loss %.2f -- Perplexity %.2f" % (self.globStep, loss, perplexity))
-                        perfFile.write("----- Step %d -- Loss %.2f -- Perplexity %.2f\n" % (self.globStep, loss, perplexity))
+                        perfFile.write(
+                            "----- Step %d -- Loss %.2f -- Perplexity %.2f\n" % (self.globStep, loss, perplexity))
 
                     # Checkpoint
                     if self.globStep % self.args.saveEvery == 0:
                         self._saveSession(sess)
 
                 # *************************************************************************
-                # Calculating BLEU score on random validation set with size k
+                # Calculating BLEU score on random validation set with size k=2000
                 self.args.test = True
                 vldBatches = self.textData.getBatches(validate=True)
                 average_bleu = 0
@@ -321,7 +347,8 @@ class Chatbot:
                 corpus_bleu = bleu_score.corpus_bleu(refs, hyps)
                 tqdm.write(
                     "----- Epoch %d -- Average BLEU %.4f -- Corpus BLEU %.4f" % (e, average_bleu, corpus_bleu))
-                perfFile.write("----- Epoch %d -- Average BLEU %.4f -- Corpus BLEU %.4f\n" % (e, average_bleu, corpus_bleu))
+                perfFile.write(
+                    "----- Epoch %d -- Average BLEU %.4f -- Corpus BLEU %.4f\n" % (e, average_bleu, corpus_bleu))
                 self.args.test = False
                 # ************************************************************************
                 toc = datetime.datetime.now()
@@ -339,12 +366,88 @@ class Chatbot:
         perfFile.flush()
         perfFile.close()
 
+    def miTrain(self, sess):
+        """ Training loop
+        Args:
+            sess: The current running session
+        """
+        self.textData.makeLighter(self.args.ratioDataset)  # Limit the number of training samples
+
+        mergedSummaries = tf.summary.merge_all()
+
+        # TODO 1:
+        # if mode changed from seq2seq to mmi(maximum mutual information)
+        #   self.globStep = 0
+        #   writer.re_add_graph(sess.graph)
+        # ps: sess.graph在model creation时已更改
+        if self.globStep == 0:
+            self.writer.add_graph(sess.graph)
+
+        print('Start mutual information model training (press Ctrl+C to save and exit)...')
+        try:
+            for e in range(self.args.numEpochs):
+                print()
+                print("----- Epoch {}/{} ; (lr={}) -----".format(e + 1, self.args.numEpochs, self.args.learningRate))
+
+                tic = datetime.datetime.now()
+
+                # TODO 1: Implement Mutual Information model Training using mutual information score
+                # Mutual information score definition(using in new object function)
+                toc = datetime.datetime.now()
+
+                print("Epoch finished in {}".format(
+                    toc - tic))
+        except (KeyboardInterrupt, SystemExit):
+            print('Interruption detected, exiting the program...')
+
+        self._saveSession(sess)
+
+    def rlTrain(self, sess):
+        """ Training loop
+        Args:
+            sess: The current running session
+        """
+        self.textData.makeLighter(self.args.ratioDataset)  # Limit the number of training samples
+
+        mergedSummaries = tf.summary.merge_all()
+
+        # TODO 1:
+        # if mode changed from mmi to rl
+        #   self.globStep = 0
+        #   writer.re_add_graph(sess.graph)
+        # 这里有可能不需要re_add,只要让计算图一开始就足够大就行，不过globalStep应该重置
+        if self.globStep == 0:
+            self.writer.add_graph(sess.graph)
+
+        print('Start reinforcement training (press Ctrl+C to save and exit)...')
+        try:
+            # TODO 1: Not sure whether numEpochs could be used
+            for e in range(self.args.numEpochs):
+                print()
+                print("----- Epoch {}/{} ; (lr={}) -----".format(e + 1, self.args.numEpochs, self.args.learningRate))
+
+                tic = datetime.datetime.now()
+
+                # TODO 1: Implement Resistance Reinforcement Training between 2 agents
+                # Reward Definition: Ease of answering & Information flow & semantic coherence
+
+                toc = datetime.datetime.now()
+
+                print("Epoch finished in {}".format(
+                    toc - tic))
+        except (KeyboardInterrupt, SystemExit):
+            print('Interruption detected, exiting the program...')
+
+        self._saveSession(sess)
+
     def predictTestset(self, sess):
         """ Try predicting the sentences from the samples.txt file.
         The sentences are saved on the modelDir under the same name
         Args:
             sess: The current running session
         """
+        # TODO 1: Add evaluation function, such as BLEU score, diversity and other evaluation number
+        # TODO 1: Create reference answers of the sample file, which will be helpful in evaluation
 
         # Loading the file to predict
         with open(os.path.join(self.args.rootDir, self.TEST_IN_NAME), 'r') as f:
@@ -357,7 +460,7 @@ class Chatbot:
             return
 
         # Predicting for each model present in modelDir
-        for modelName in sorted(modelList):  # TODO: Natural sorting
+        for modelName in sorted(modelList):
             print('Restoring previous model from {}'.format(modelName))
             self.saver.restore(sess, modelName)
             print('Testing...')
@@ -387,9 +490,8 @@ class Chatbot:
         Args:
             sess: The current running session
         """
-        # TODO: If verbose mode, also show similar sentences from the training set with the same words (include in mainTest also)
-        # TODO: Also show the top 10 most likely predictions for each predicted output (when verbose mode)
-        # TODO: Log the questions asked for latter re-use (merge with test/samples.txt)
+        # TODO 2: Also show the top 10 most likely predictions for each predicted output (when verbose mode?)
+        # TODO 3: Log the questions asked for latter re-use (merge with test/samples.txt)
 
         print('Testing: Launch interactive mode:')
         print('')
@@ -403,6 +505,35 @@ class Chatbot:
 
             questionSeq = []  # Will be contain the question as seen by the encoder
             answer = self.singlePredict(question, questionSeq)
+            if not answer:
+                print('Warning: sentence too long, sorry. Maybe try a simpler sentence.')
+                continue  # Back to the beginning, try again
+
+            print('{}{}'.format(self.SENTENCES_PREFIX[1], self.textData.sequence2str(answer, clean=True)))
+
+            if self.args.verbose:
+                print(self.textData.batchSeq2str(questionSeq, clean=True, reverse=True))
+                print(self.textData.sequence2str(answer))
+
+            print()
+
+    def agentsTestInteractive(self, sess):
+        """ Try predicting the sentences that the user will enter in the console
+        Args:
+            sess: The current running session
+        """
+        # TODO 1: Implement agents test
+        print('Testing: Launch agent mode:')
+        print('')
+        print('Welcome to the agent interactive mode, here you can propose a question to Deep Q&A 2-Agents. Don\'t '
+              'have high expectation. Type \'exit\' or just press ENTER to quit the program. Have fun.')
+        while True:
+            question = input(self.SENTENCES_PREFIX[0])
+            if question == '' or question == 'exit':
+                break
+
+            questionSeq = []  # Will be contain the question as seen by the encoder
+            answer = self.historyPredict(question, questionSeq)
             if not answer:
                 print('Warning: sentence too long, sorry. Maybe try a simpler sentence.')
                 continue  # Back to the beginning, try again
@@ -432,7 +563,8 @@ class Chatbot:
 
         # Run the model
         ops, feedDict = self.model.step(batch)
-        output = self.sess.run(ops[0], feedDict)  # TODO: Summarize the output too (histogram, ...)
+        output = self.sess.run(ops[0], feedDict)
+        # print(output)
         answer = self.textData.deco2sentence(output)
 
         return answer
@@ -449,12 +581,49 @@ class Chatbot:
             clean=True
         )
 
+    def historyPredict(self, question, questionSeq=None):
+        """ Predict the sentence
+        Args:
+            question (str): the raw input sentence
+            questionSeq (List<int>): output argument. If given will contain the input batch sequence
+        Return:
+            list <int>: the word ids corresponding to the answer
+        """
+        # TODO 1: Implement history predict function
+        # Create the input batch
+        batch = self.textData.sentence2enco(question)
+        if not batch:
+            return None
+        if questionSeq is not None:  # If the caller want to have the real input
+            questionSeq.extend(batch.encoderSeqs)
+
+        # Run the model
+        ops, feedDict = self.model.step(batch)
+        output = self.sess.run(ops[0], feedDict)
+        answer = self.textData.deco2sentence(output)
+
+        return answer
+
     def daemonClose(self):
         """ A utility function to close the daemon when finish
         """
         print('Exiting the daemon mode...')
         self.sess.close()
         print('Daemon closed.')
+
+    def evaluations(self):
+        """ An evaluation function to judge the performance of the model on test set
+        :return:
+            score: the quantized score of model performance
+        """
+        # TODO 1: Implement evaluations on test set
+        # BLEU score
+        # Perplexity
+        # Length of the dialogue->only use in agents performance evaluations
+        # Diversity:type-token ratio for unigrams and bigrams(seq2seq,rl->beam search(10),mutual information->n-best list(10) use only in testing)
+        # Human evaluation
+        score = 0
+        return score
 
     def loadEmbedding(self, sess):
         """ Initialize embeddings with pre-trained word2vec vectors
@@ -573,7 +742,7 @@ class Chatbot:
         """
         tqdm.write('Checkpoint reached: saving model (don\'t stop the run)...')
         self.saveModelParams()
-        self.saver.save(sess, self._getModelName())  # TODO: Put a limit size (ex: 3GB for the modelDir)
+        self.saver.save(sess, self._getModelName())
         tqdm.write('Model saved.')
 
     def _getModelList(self):
@@ -612,10 +781,14 @@ class Chatbot:
             # Restoring the the parameters
             self.globStep = config['General'].getint('globStep')
             self.args.maxLength = config['General'].getint(
-                'maxLength')  # We need to restore the model length because of the textData associated and the vocabulary size (TODO: Compatibility mode between different maxLength)
+                'maxLength')
+            # We need to restore the model length because of the textData associated and the vocabulary size
+            # TODO 3: Compatibility mode between different maxLength
             self.args.watsonMode = config['General'].getboolean('watsonMode')
             self.args.corpus = config['General'].get('corpus')
             self.args.datasetTag = config['General'].get('datasetTag', '')
+            self.args.holdout = config['General'].getint('holdout')
+            self.args.historyInputs = config['General'].getboolean('historyInputs')
 
             self.args.hiddenSize = config['Network'].getint('hiddenSize')
             self.args.numLayers = config['Network'].getint('numLayers')
@@ -634,6 +807,8 @@ class Chatbot:
             print('watsonMode: {}'.format(self.args.watsonMode))
             print('corpus: {}'.format(self.args.corpus))
             print('datasetTag: {}'.format(self.args.datasetTag))
+            print('holdout: {}'.format(self.args.holdout))
+            print('historyInputs: {}'.format(self.args.historyInputs))
             print('hiddenSize: {}'.format(self.args.hiddenSize))
             print('numLayers: {}'.format(self.args.numLayers))
             print('embeddingSize: {}'.format(self.args.embeddingSize))
@@ -661,6 +836,8 @@ class Chatbot:
         config['General']['watsonMode'] = str(self.args.watsonMode)
         config['General']['corpus'] = str(self.args.corpus)
         config['General']['datasetTag'] = str(self.args.datasetTag)
+        config['General']['holdout'] = str(self.args.holdout)
+        config['General']['historyInputs'] = str(self.args.historyInputs)
 
         config['Network'] = {}
         config['Network']['hiddenSize'] = str(self.args.hiddenSize)
@@ -675,6 +852,8 @@ class Chatbot:
         config['Training (won\'t be restored)']['learningRate'] = str(self.args.learningRate)
         config['Training (won\'t be restored)']['batchSize'] = str(self.args.batchSize)
         config['Training (won\'t be restored)']['dropout'] = str(self.args.dropout)
+        config['Training (won\'t be restored)']['mmiN'] = str(self.args.mmiN)
+        config['Training (won\'t be restored)']['maxGradientNorm'] = str(self.args.maxGradientNorm)
 
         with open(os.path.join(self.modelDir, self.CONFIG_FILENAME), 'w') as configFile:
             config.write(configFile)
