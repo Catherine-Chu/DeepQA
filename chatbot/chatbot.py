@@ -312,24 +312,24 @@ class Chatbot:
                 # TODO 2: Also update learning parameters eventually
 
                 tic = datetime.datetime.now()
-                # for nextBatch in tqdm(batches, desc="Training"):
-                #     # Training pass
-                #     ops, feedDict = self.model.step(nextBatch)
-                #     assert len(ops) == 2  # training, loss
-                #     _, loss, summary = sess.run(ops + (mergedSummaries,), feedDict)
-                #     self.writer.add_summary(summary, self.globStep)
-                #     self.globStep += 1
-                #
-                #     # Output training status
-                #     if self.globStep % 200 == 0:
-                #         perplexity = math.exp(float(loss)) if loss < 300 else float("inf")
-                #         tqdm.write("----- Step %d -- Loss %.2f -- Perplexity %.2f" % (self.globStep, loss, perplexity))
-                #         perfFile.write(
-                #             "----- Step %d -- Loss %.2f -- Perplexity %.2f\n" % (self.globStep, loss, perplexity))
-                #
-                #     # Checkpoint
-                #     if self.globStep % self.args.saveEvery == 0:
-                #         self._saveSession(sess)
+                for nextBatch in tqdm(batches, desc="Training"):
+                    # Training pass
+                    ops, feedDict = self.model.step(nextBatch)
+                    assert len(ops) == 2  # training, loss
+                    _, loss, summary = sess.run(ops + (mergedSummaries,), feedDict)
+                    self.writer.add_summary(summary, self.globStep)
+                    self.globStep += 1
+
+                    # Output training status
+                    if self.globStep % 200 == 0:
+                        perplexity = math.exp(float(loss)) if loss < 300 else float("inf")
+                        tqdm.write("----- Step %d -- Loss %.2f -- Perplexity %.2f" % (self.globStep, loss, perplexity))
+                        perfFile.write(
+                            "----- Step %d -- Loss %.2f -- Perplexity %.2f\n" % (self.globStep, loss, perplexity))
+
+                    # Checkpoint
+                    if self.globStep % self.args.saveEvery == 0:
+                        self._saveSession(sess)
 
                 # *************************************************************************
                 # Calculating BLEU score on random validation set with size k=2000
