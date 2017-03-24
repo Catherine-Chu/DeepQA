@@ -66,6 +66,7 @@ class Chatbot:
         # Task specific object
         self.textData = None  # Dataset
         self.model = None  # Sequence to sequence model
+        self.vldmodel = None
 
         # Tensorflow utilities for convenience saving/logging
         self.writer = None
@@ -75,6 +76,7 @@ class Chatbot:
 
         # TensorFlow main session (we keep track for the daemon)
         self.sess = None
+        self.vldsess = None
 
         # Filename and directories constants
         self.MODEL_DIR_BASE = 'save/model'
@@ -207,6 +209,11 @@ class Chatbot:
 
         with tf.device(self.getDevice()):
             self.model = Model(self.args, self.textData)
+            if self.args.train:
+                self.args.test = True
+                with tf.variable_scope("validation"):
+                    self.vldmodel = Model(self.args, self.textData)
+                self.args.test = False
 
         # Saver/summaries
         self.writer = tf.summary.FileWriter(self._getSummaryName())
@@ -218,6 +225,7 @@ class Chatbot:
         # Add by wenjie: limit the gpu
         config.gpu_options.allow_growth = True
         self.sess = tf.Session(config=config)
+        self.vldsess = tf.Session(config=config)
 
         print('Initialize variables...')
         self.sess.run(tf.global_variables_initializer())
@@ -268,6 +276,7 @@ class Chatbot:
 
         if self.args.test != Chatbot.TestMode.DAEMON:
             self.sess.close()
+            self.vldsess.close()
             print("The End! Thanks for using this program")
 
     def mainTrain(self, sess):
@@ -303,24 +312,24 @@ class Chatbot:
                 # TODO 2: Also update learning parameters eventually
 
                 tic = datetime.datetime.now()
-                for nextBatch in tqdm(batches, desc="Training"):
-                    # Training pass
-                    ops, feedDict = self.model.step(nextBatch)
-                    assert len(ops) == 2  # training, loss
-                    _, loss, summary = sess.run(ops + (mergedSummaries,), feedDict)
-                    self.writer.add_summary(summary, self.globStep)
-                    self.globStep += 1
-
-                    # Output training status
-                    if self.globStep % 200 == 0:
-                        perplexity = math.exp(float(loss)) if loss < 300 else float("inf")
-                        tqdm.write("----- Step %d -- Loss %.2f -- Perplexity %.2f" % (self.globStep, loss, perplexity))
-                        perfFile.write(
-                            "----- Step %d -- Loss %.2f -- Perplexity %.2f\n" % (self.globStep, loss, perplexity))
-
-                    # Checkpoint
-                    if self.globStep % self.args.saveEvery == 0:
-                        self._saveSession(sess)
+                # for nextBatch in tqdm(batches, desc="Training"):
+                #     # Training pass
+                #     ops, feedDict = self.model.step(nextBatch)
+                #     assert len(ops) == 2  # training, loss
+                #     _, loss, summary = sess.run(ops + (mergedSummaries,), feedDict)
+                #     self.writer.add_summary(summary, self.globStep)
+                #     self.globStep += 1
+                #
+                #     # Output training status
+                #     if self.globStep % 200 == 0:
+                #         perplexity = math.exp(float(loss)) if loss < 300 else float("inf")
+                #         tqdm.write("----- Step %d -- Loss %.2f -- Perplexity %.2f" % (self.globStep, loss, perplexity))
+                #         perfFile.write(
+                #             "----- Step %d -- Loss %.2f -- Perplexity %.2f\n" % (self.globStep, loss, perplexity))
+                #
+                #     # Checkpoint
+                #     if self.globStep % self.args.saveEvery == 0:
+                #         self._saveSession(sess)
 
                 # *************************************************************************
                 # Calculating BLEU score on random validation set with size k=2000
@@ -333,22 +342,21 @@ class Chatbot:
                     assert len(vldbatch) == 2
                     inputSeqs = vldbatch[0]
                     targetSeqs = vldbatch[1]
-                    question = self.textData.sequence2str(self.textData.deco2sentence(inputSeqs),
-                                                          clean=True)
-                    answer = self.singlePredict(question)
+                    question = self.textData.sequence2str(inputSeqs, clean=True)
+                    questionSeq = []
+                    answer = self.singlePredict(question, questionSeq, vld=True)
                     ref = self.textData.sequence2str(answer, clean=True).split()
                     refs.append([ref])
-                    hyp = self.textData.sequence2str(self.textData.deco2sentence(targetSeqs),
-                                                     clean=True).split()
+                    hyp = self.textData.sequence2str(targetSeqs, clean=True).split()
                     hyps.append(hyp)
                     bleu = bleu_score.sentence_bleu([ref], hyp)
                     average_bleu += bleu
                 average_bleu /= len(self.textData.validatingSamples)
                 corpus_bleu = bleu_score.corpus_bleu(refs, hyps)
                 tqdm.write(
-                    "----- Epoch %d -- Average BLEU %.4f -- Corpus BLEU %.4f" % (e, average_bleu, corpus_bleu))
+                    "----- Epoch %d -- Average BLEU %.4f -- Corpus BLEU %.4f" % (e + 1, average_bleu, corpus_bleu))
                 perfFile.write(
-                    "----- Epoch %d -- Average BLEU %.4f -- Corpus BLEU %.4f\n" % (e, average_bleu, corpus_bleu))
+                    "----- Epoch %d -- Average BLEU %.4f -- Corpus BLEU %.4f\n" % (e + 1, average_bleu, corpus_bleu))
                 self.args.test = False
                 # ************************************************************************
                 toc = datetime.datetime.now()
@@ -546,7 +554,7 @@ class Chatbot:
 
             print()
 
-    def singlePredict(self, question, questionSeq=None):
+    def singlePredict(self, question, questionSeq=None, vld=False):
         """ Predict the sentence
         Args:
             question (str): the raw input sentence
@@ -562,11 +570,19 @@ class Chatbot:
             questionSeq.extend(batch.encoderSeqs)
 
         # Run the model
-        ops, feedDict = self.model.step(batch)
-        output = self.sess.run(ops[0], feedDict)
+        ops = None
+        output = None
+        if not vld:
+            ops, feedDict = self.model.step(batch)
+            output = self.sess.run(ops[0], feedDict)
+        else:
+            ckpt = tf.train.get_checkpoint_state(self.modelDir)
+            self.saver.restore(self.vldsess, ckpt.model_checkpoint_path)
+            ops, feedDict = self.vldmodel.step(batch)
+            output = self.vldsess.run(ops[0], feedDict)
+        # print(ops[0])
         # print(output)
         answer = self.textData.deco2sentence(output)
-
         return answer
 
     def daemonPredict(self, sentence):

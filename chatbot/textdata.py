@@ -174,6 +174,7 @@ class TextData:
                 self.args.maxLengthDeco - len(batch.targetSeqs[i]))
 
         # Simple hack to reshape the batch
+        # 对encoderSeqs做转置，使得encoderSeqs[i]代表多个句子的第i个单词，len(encoderSeqs)=maxLengthEnco而不是batchSize
         encoderSeqsT = []  # Corrected orientation
         for i in range(self.args.maxLengthEnco):
             encoderSeqT = []
@@ -217,7 +218,7 @@ class TextData:
         else:
             if not len(self.validatingSamples) == 0:
                 self.validatingSamples.clear()
-            self.validatingSamples.extend(random.sample(self.trainingSamples, 2000))
+            self.validatingSamples.extend(random.sample(self.trainingSamples, 100))
             self.vld_shuffle()
 
         batches = []

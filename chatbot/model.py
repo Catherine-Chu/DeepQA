@@ -283,9 +283,10 @@ class Model:
                     self.outputs = [outputProjection(output) for output in decoderOutputs]
 
                 # TODO 1：直接继续定义lossfct2（应该说是改变里面的输入输出和weight参数指代，调用的可能还是tf.contrib.*）
-                convReward = [tf.reduce_mean([computeMI(decoderCandidate, self.encoderInputs[convId])
-                                              for decoderCandidate in self.decoder2Nbest(self.outputs[convId], self.args.mmiN)])
-                              for convId in range(len(self.outputs))]
+                # TODO 1: 这里encoderInputs也要根据其数据结构进行处理，提取出相对应的完成onebatch语句
+                i = 0
+                convReward = [(tf.reduce_mean(computeMI(decoderCandidate, self.encoderInputs[i]) for decoderCandidate in onebatch))
+                              for onebatch in self.decoder2Nbest(self.outputs, self.args.mmiN)]
                 # 一个batch的数据做一次综合Reward计算（类似上面的sequence loss吧虽然也不知道上面的sequence loss是不是这个意思）
                 self.mmiReward = tf.reduce_mean(convReward)
                 # TODO 1：修改summary的内容，summary应该是主要用于可视化的，具体作用不清楚，包括writer好像也是
