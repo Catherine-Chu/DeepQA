@@ -57,6 +57,11 @@ class Chatbot:
         MUTUALINFO ='mutualinfo'
         REINFORCEMENT = 'reinforcement'
 
+    class ModelTag:
+        SEQ2SEQ_TAG = 'seq2seq'
+        BACKWARD_TAG = 'backward'
+        POLICY_RL_TAG = 'policyRL'
+
     def __init__(self):
         """
         """
@@ -67,6 +72,8 @@ class Chatbot:
         self.textData = None  # Dataset
         self.model = None  # Sequence to sequence model
         self.vldmodel = None
+        self.backward = None
+        self.forward = None
 
         # Tensorflow utilities for convenience saving/logging
         self.writer = None
@@ -77,6 +84,8 @@ class Chatbot:
         # TensorFlow main session (we keep track for the daemon)
         self.sess = None
         self.vldsess = None
+        self.for2sess = None
+        self.backsess = None
 
         # Filename and directories constants
         self.MODEL_DIR_BASE = 'save/model'
@@ -124,16 +133,18 @@ class Chatbot:
                                 help='use this if you want to ignore the previous model present on the model directory (Warning: the model will be destroyed with all the folder content)')
         globalArgs.add_argument('--verbose', action='store_true',
                                 help='When testing, will plot the outputs at the same time they are computed')
-        globalArgs.add_argument('--keepAll', action='store_true',
-                                help='If this option is set, all saved model will be keep (Warning: make sure you have enough free disk space or increase saveEvery)')  # TODO 3: Add an option to delimit the max size
-        globalArgs.add_argument('--modelTag', type=str, default=None,
+        globalArgs.add_argument('--keepAll', type=int, default=10,
+                                help='If this option is set, limited size saved model will be keep (Warning: make sure you have enough free disk space or increase saveEvery)')
+        globalArgs.add_argument('--modelTag', nargs='?',
+                                choices=[Chatbot.ModelTag.SEQ2SEQ_TAG, Chatbot.ModelTag.BACKWARD_TAG, Chatbot.ModelTag.POLICY_RL_TAG],
+                                const=Chatbot.ModelTag.SEQ2SEQ_TAG, default=None,
                                 help='tag to differentiate which model to store/load')
         globalArgs.add_argument('--rootDir', type=str, default=None,
                                 help='folder where to look for the models and data')
         globalArgs.add_argument('--watsonMode', action='store_true',
                                 help='Inverse the questions and answer when training (the network try to guess the question)')
         globalArgs.add_argument('--device', type=str, default=None,
-                                help='\'gpu\' or \'cpu\' (Warning: make sure you have enough free RAM), allow to choose on which hardware run the model')
+                                help='\'gpu<i>\' or \'cpu\' (Warning: make sure you have enough free RAM), allow to choose on which hardware run the model')
         globalArgs.add_argument('--seed', type=int, default=None, help='random seed for replication')
 
         # Dataset options
@@ -177,6 +188,8 @@ class Chatbot:
         trainingArgs.add_argument('--dropout', type=float, default=0.9, help='Dropout rate (keep probabilities)')
         trainingArgs.add_argument('--mmiN', type=int, default=10, help='MMI model n-best parameter N')
         trainingArgs.add_argument('--maxGradientNorm', type=float, default=5.0, help='Clip gradients to this norm in SGD optimizer')
+        trainingArgs.add_argument('--validate', type=int, default=0,
+                                 help='if greater than 0, validating bleu score on validating samples with size --validate during training')
 
         return parser.parse_args(args)
 
@@ -208,24 +221,38 @@ class Chatbot:
             return  # No need to go further
 
         with tf.device(self.getDevice()):
+            # self.model = Model(self.args, self.textData)
+            # 主模型（根据训练train选项分别代表seq2seq(fore or back),matual info,rl, test不同模型的支持还没有加)
             self.model = Model(self.args, self.textData)
+
+            if self.args.train and self.args.test:
+                self.args.test = False
             if self.args.train:
                 self.args.test = True
                 with tf.variable_scope("validation"):
                     self.vldmodel = Model(self.args, self.textData)
+                with tf.variable_scope("forward"):
+                    self.forward = Model(self.args, self.textData)
+                with tf.variable_scope("backward"):
+                    self.backward = Model(self.args, self.textData)
                 self.args.test = False
+
 
         # Saver/summaries
         self.writer = tf.summary.FileWriter(self._getSummaryName())
         # tf0.12 and before:self.writer = tf.train.SummaryWriter(self._getSummaryName())
-        self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=200)  # Arbitrary limit ?
+        self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=self.args.keepAll)
 
         # Running session
         config = tf.ConfigProto(allow_soft_placement=True)
         # Add by wenjie: limit the gpu
         config.gpu_options.allow_growth = True
         self.sess = tf.Session(config=config)
-        self.vldsess = tf.Session(config=config)
+        if self.args.train and self.args.validate > 0:
+            self.vldsess = tf.Session(config=config)
+        if self.args.train == Chatbot.TrainMode.MUTUALINFO or self.args.train == Chatbot.TrainMode.REINFORCEMENT:
+            self.for2sess = tf.Session(config=config)
+            self.backsess = tf.Session(config=config)
 
         print('Initialize variables...')
         self.sess.run(tf.global_variables_initializer())
@@ -276,7 +303,8 @@ class Chatbot:
 
         if self.args.test != Chatbot.TestMode.DAEMON:
             self.sess.close()
-            self.vldsess.close()
+            if self.args.train and self.args.validate > 0:
+                self.vldsess.close()
             print("The End! Thanks for using this program")
 
     def mainTrain(self, sess):
@@ -312,9 +340,11 @@ class Chatbot:
                 # TODO 2: Also update learning parameters eventually
 
                 tic = datetime.datetime.now()
+
                 for nextBatch in tqdm(batches, desc="Training"):
                     # Training pass
                     ops, feedDict = self.model.step(nextBatch)
+
                     assert len(ops) == 2  # training, loss
                     _, loss, summary = sess.run(ops + (mergedSummaries,), feedDict)
                     self.writer.add_summary(summary, self.globStep)
@@ -330,34 +360,36 @@ class Chatbot:
                     # Checkpoint
                     if self.globStep % self.args.saveEvery == 0:
                         self._saveSession(sess)
-
                 # *************************************************************************
-                # Calculating BLEU score on random validation set with size k=2000
-                self.args.test = True
-                vldBatches = self.textData.getBatches(validate=True)
-                average_bleu = 0
-                refs = []
-                hyps = []
-                for vldbatch in tqdm(vldBatches, desc="Validating"):
-                    assert len(vldbatch) == 2
-                    inputSeqs = vldbatch[0]
-                    targetSeqs = vldbatch[1]
-                    question = self.textData.sequence2str(inputSeqs, clean=True)
-                    questionSeq = []
-                    answer = self.singlePredict(question, questionSeq, vld=True)
-                    ref = self.textData.sequence2str(answer, clean=True).split()
-                    refs.append([ref])
-                    hyp = self.textData.sequence2str(targetSeqs, clean=True).split()
-                    hyps.append(hyp)
-                    bleu = bleu_score.sentence_bleu([ref], hyp)
-                    average_bleu += bleu
-                average_bleu /= len(self.textData.validatingSamples)
-                corpus_bleu = bleu_score.corpus_bleu(refs, hyps)
-                tqdm.write(
-                    "----- Epoch %d -- Average BLEU %.4f -- Corpus BLEU %.4f" % (e + 1, average_bleu, corpus_bleu))
-                perfFile.write(
-                    "----- Epoch %d -- Average BLEU %.4f -- Corpus BLEU %.4f\n" % (e + 1, average_bleu, corpus_bleu))
-                self.args.test = False
+                # Calculating BLEU score on random validation set with size k=validate
+                if self.args.validate > 0:
+                    self.args.test = True
+                    vldBatches = self.textData.getBatches(validate=self.args.validate)
+                    average_bleu = 0
+                    refs = []
+                    hyps = []
+                    for vldbatch in tqdm(vldBatches, desc="Validating"):
+                        assert len(vldbatch) == 2
+                        inputSeqs = vldbatch[0]
+                        targetSeqs = vldbatch[1]
+                        question = self.textData.sequence2str(inputSeqs, clean=True)
+                        questionSeq = []
+                        answer = self.singlePredict(question, questionSeq, vld=True)
+                        # ref = self.textData.sequence2str(answer, clean=True).split()
+                        ref = nltk.word_tokenize(self.textData.sequence2str(answer, clean=True))
+                        refs.append([ref])
+                        # hyp = self.textData.sequence2str(targetSeqs, clean=True).split()
+                        hyp = nltk.word_tokenize(self.textData.sequence2str(targetSeqs, clean=True))
+                        hyps.append(hyp)
+                        bleu = bleu_score.sentence_bleu([ref], hyp, smoothing_function=bleu_score.SmoothingFunction().method2)
+                        average_bleu += bleu
+                    average_bleu /= len(self.textData.validatingSamples)
+                    corpus_bleu = bleu_score.corpus_bleu(refs, hyps, smoothing_function=bleu_score.SmoothingFunction().method2)
+                    tqdm.write(
+                        "----- Epoch %d -- Average BLEU %.4f -- Corpus BLEU %.4f" % (e + 1, average_bleu, corpus_bleu))
+                    perfFile.write(
+                        "----- Epoch %d -- Average BLEU %.4f -- Corpus BLEU %.4f\n" % (e + 1, average_bleu, corpus_bleu))
+                    self.args.test = False
                 # ************************************************************************
                 toc = datetime.datetime.now()
 
@@ -438,7 +470,32 @@ class Chatbot:
 
                 # TODO 1: Implement Resistance Reinforcement Training between 2 agents
                 # Reward Definition: Ease of answering & Information flow & semantic coherence
+                modelPath1 = os.path.join(self.args.rootDir,
+                                          self.MODEL_DIR_BASE) + '-' + Chatbot.ModelTag.SEQ2SEQ_TAG
+                ckpt1 = tf.train.get_checkpoint_state(modelPath1)
+                self.saver.restore(self.for2sess, ckpt1.model_checkpoint_path)
+                modelPath2 = os.path.join(self.args.rootDir,
+                                          self.MODEL_DIR_BASE) + '-' + Chatbot.ModelTag.BACKWARD_TAG
+                ckpt2 = tf.train.get_checkpoint_state(modelPath2)
+                self.saver.restore(self.backsess, ckpt2.model_checkpoint_path)
 
+                # TODO: 需要做新的数据处理，配合historyInputs
+                if not self.args.historyInputs:
+                    datas = self.textData.getBatches(validate=len(self.trainingSamples))
+                    for data in tqdm(datas, desc="seq2seq"):
+                        assert len(data) == 2
+                        inputSeqs = data[0]
+                        targetSeqs = data[1]
+                        # Seq2Seq Model p(a|q)
+                        question = self.textData.sequence2str(inputSeqs, clean=True)
+                        questionSeq = []
+                        answer = self.singlePredict(question, questionSeq, rl=1)
+                        # Seq2Seq backward model p(q|a)
+                        backques = self.textData.sequence2str(targetSeqs, clean=True)
+                        backquesSeq = []
+                        origin = self.singlePredict(backques, backquesSeq, rl=2)
+                else:
+                    datas = []
                 toc = datetime.datetime.now()
 
                 print("Epoch finished in {}".format(
@@ -554,7 +611,7 @@ class Chatbot:
 
             print()
 
-    def singlePredict(self, question, questionSeq=None, vld=False):
+    def singlePredict(self, question, questionSeq=None, vld=False, rl=0):
         """ Predict the sentence
         Args:
             question (str): the raw input sentence
@@ -572,14 +629,20 @@ class Chatbot:
         # Run the model
         ops = None
         output = None
-        if not vld:
+        if not vld and rl == 0:
             ops, feedDict = self.model.step(batch)
             output = self.sess.run(ops[0], feedDict)
-        else:
+        elif vld:
             ckpt = tf.train.get_checkpoint_state(self.modelDir)
             self.saver.restore(self.vldsess, ckpt.model_checkpoint_path)
             ops, feedDict = self.vldmodel.step(batch)
             output = self.vldsess.run(ops[0], feedDict)
+        elif rl == 1:
+            ops, feedDict = self.model.step(batch)
+            output = self.for2sess.run(ops[0], feedDict)
+        elif rl == 2:
+            ops, feedDict = self.backward.step(batch)
+            output = self.backsess.run(ops[0], feedDict)
         # print(ops[0])
         # print(output)
         answer = self.textData.deco2sentence(output)
@@ -607,7 +670,7 @@ class Chatbot:
         """
         # TODO 1: Implement history predict function
         # Create the input batch
-        batch = self.textData.sentence2enco(question)
+        batch = self.textData.sentence2enco(question, ishistory=True)
         if not batch:
             return None
         if questionSeq is not None:  # If the caller want to have the real input
@@ -725,17 +788,18 @@ class Chatbot:
                 print('Reset: Destroying previous model at {}'.format(self.modelDir))
             # Analysing directory content
             elif ckpt and tf.train.checkpoint_exists(
-                    ckpt.model_checkpoint_path) and modelName == ckpt.model_checkpoint_path:
+                    ckpt.model_checkpoint_path) and modelName+'-'+str(self.globStep) == ckpt.model_checkpoint_path:
                 # os.path.exists(modelName):  # Restore the model
-                print('Restoring previous model from {}'.format(modelName))
+                print('Restoring previous model from {}'.format(modelName+'-'+str(self.globStep)))
                 self.saver.restore(sess, ckpt.model_checkpoint_path)
                 # self.saver.restore(sess, modelName)
                 # Will crash when --reset is not activated and the model has not been saved yet
                 print('Model restored.')
             elif self._getModelList():
+                print(self._getModelList())
                 print('Conflict with previous models.')
                 raise RuntimeError(
-                    'Some models are already present in \'{}\'. You should check them first (or re-try with the keepAll flag)'.format(
+                    'Some models are already present in \'{}\'. You should check them first.'.format(
                         self.modelDir))
             else:  # No other model to conflict with (probably summary files)
                 print('No previous model found, but some files found at {}. Cleaning...'.format(
@@ -758,14 +822,14 @@ class Chatbot:
         """
         tqdm.write('Checkpoint reached: saving model (don\'t stop the run)...')
         self.saveModelParams()
-        self.saver.save(sess, self._getModelName())
+        self.saver.save(sess, self._getModelName(), global_step=self.globStep)
         tqdm.write('Model saved.')
 
     def _getModelList(self):
         """ Return the list of the model files inside the model directory
         """
-        return [os.path.join(self.modelDir, f[0:f.index('.ckpt') + 5]) for f in os.listdir(self.modelDir) if
-                f.endswith(self.MODEL_EXT + '.index')]
+        return [os.path.join(self.modelDir, f[0:f.index('.index')]) for f in os.listdir(self.modelDir) if
+                f.endswith('.index')]
 
     def loadModelParams(self):
         """ Load the some values associated with the current model, like the current globStep value
@@ -834,7 +898,10 @@ class Chatbot:
             print()
 
         # For now, not arbitrary  independent maxLength between encoder and decoder
-        self.args.maxLengthEnco = self.args.maxLength
+        if not self.args.historyInputs:
+            self.args.maxLengthEnco = self.args.maxLength
+        else:
+            self.args.maxLengthEnco = 2*self.args.maxLength
         self.args.maxLengthDeco = self.args.maxLength + 2
 
         if self.args.watsonMode:
@@ -890,8 +957,8 @@ class Chatbot:
             str: The path and name were the model need to be saved
         """
         modelName = os.path.join(self.modelDir, self.MODEL_NAME_BASE)
-        if self.args.keepAll:  # We do not erase the previously saved model by including the current step on the name
-            modelName += '-' + str(self.globStep)
+        # if self.args.keepAll:  # We do not erase the previously saved model by including the current step on the name
+        #     modelName += '-' + str(self.globStep)
         return modelName + self.MODEL_EXT
 
     def getDevice(self):
@@ -901,8 +968,12 @@ class Chatbot:
         """
         if self.args.device == 'cpu':
             return '/cpu:0'
-        elif self.args.device == 'gpu':
+        elif self.args.device == 'gpu0' or self.args.device == 'gpu':
             return '/gpu:0'
+        elif self.args.device == 'gpu1':
+            return '/gpu:1'
+        elif self.args.device == 'gpu2':
+            return '/gpu:2'
         elif self.args.device is None:  # No specified device (default)
             return None
         else:

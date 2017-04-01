@@ -111,6 +111,8 @@ class TextData:
         baseName = 'dataset-{}'.format(self.args.corpus)
         if self.args.datasetTag:
             baseName += '-' + self.args.datasetTag
+        if self.args.historyInputs:
+            baseName += '-h'
         return '{}-{}.pkl'.format(baseName, self.args.maxLength)
 
     def makeLighter(self, ratioDataset):
@@ -208,17 +210,20 @@ class TextData:
 
         return batch
 
-    def getBatches(self, validate=False):
+    def getBatches(self, validate=0):
         """Prepare the batches for the current epoch
         Return:
             list<Batch>: Get a list of the batches for the next epoch
         """
-        if not validate:
+        if validate == 0:
             self.shuffle()
         else:
             if not len(self.validatingSamples) == 0:
                 self.validatingSamples.clear()
-            self.validatingSamples.extend(random.sample(self.trainingSamples, 100))
+            if validate == len(self.trainingSamples):
+                self.validatingSamples.extend(self.trainingSamples)
+            else:
+                self.validatingSamples.extend(random.sample(self.trainingSamples, validate))
             self.vld_shuffle()
 
         batches = []
@@ -226,7 +231,7 @@ class TextData:
         def genNextSamples(vld):
             """ Generator over the mini-batch training samples
             """
-            if not vld:
+            if vld == 0:
                 for i in range(0, self.getSampleSize()[0], self.args.batchSize):
                     # i取0-SampleSize中的值，循环间取值间隔为batchSize
                     yield self.trainingSamples[i:min(i + self.args.batchSize, self.getSampleSize()[0])]
@@ -239,7 +244,7 @@ class TextData:
         # samples为一组qa对，大小由batchSize和getSampleSize返回值两个参数决定
         for samples in genNextSamples(validate):
             # 一个batch（也就是一次性训练数据量）由一个samples，即一组qa对组成
-            if not validate:
+            if validate == 0:
                 batch = self._createBatch(samples)
             else:
                 batch = samples[0]
@@ -358,12 +363,12 @@ class TextData:
             targetLine = conversation["lines"][i + 1]
 
             inputWords = self.extractText(inputLine["text"])
-            targetWords = self.extractText(targetLine["text"], True)
+            targetWords = self.extractText(targetLine["text"], isTarget=True)
 
             if inputWords and targetWords:  # Filter wrong samples (if one of the list is empty)
                 self.trainingSamples.append([inputWords, targetWords])
 
-    def extractHistoryConversation(self, conversation):
+    def extractHistoryConversation(self, conversation, method=2):
         """Extract the sample lines from the conversations
         Args:
             conversation (Obj): a conversation object containing the lines to extract
@@ -372,16 +377,23 @@ class TextData:
         # Iterate over all the lines of the conversation
         for i in tqdm_wrap(range(len(conversation['lines'])-2),
                            desc='Conversation', leave=False):
-            inputLine = conversation["lines"][i]+' '+conversation["lines"][i + 1]
+            inputLine1 = conversation["lines"][i]
+            inputLine2 = conversation["lines"][i + 1]
             targetLine = conversation["lines"][i + 2]
+            if method == 1:
+                inputWords1 = self.extractText(inputLine1["text"])
+                inputWords2 = self.extractText(inputLine2["text"])
 
-            inputWords = self.extractText(inputLine["text"])
-            targetWords = self.extractText(targetLine["text"], True)
+                inputWords1.extend(inputWords2)
+            elif method == 2:
+                inputWords1 = self.extractText(inputLine1["text"]+' '+inputLine2["text"], ishistory=True)
 
-            if inputWords and targetWords:  # Filter wrong samples (if one of the list is empty)
-                self.trainingSamples.append([inputWords, targetWords])
+            targetWords = self.extractText(targetLine["text"], isTarget=True)
 
-    def extractText(self, line, isTarget=False):
+            if inputWords1 and targetWords:  # Filter wrong samples (if one of the list is empty)
+                self.trainingSamples.append([inputWords1, targetWords])
+
+    def extractText(self, line, isTarget=False, ishistory = False):
         """Extract the words from a sample lines
         Args:
             line (str): a line containing the text to extract
@@ -404,7 +416,11 @@ class TextData:
             tokens = nltk.word_tokenize(sentencesToken[i])
 
             # If the total length is not too big, we still can add one more sentence
-            if len(words) + len(tokens) <= self.args.maxLength:
+            if not ishistory:
+                hold = self.args.maxLength
+            else:
+                hold = 2 * self.args.maxLength
+            if len(words) + len(tokens) <= hold:
                 tempWords = []
                 for token in tokens:
                     # TODO 1: create vocabulary  in limited size
@@ -516,7 +532,7 @@ class TextData:
             sequence.append(batchSeq[i][seqId])
         return self.sequence2str(sequence, **kwargs)
 
-    def sentence2enco(self, sentence):
+    def sentence2enco(self, sentence, ishistory=False):
         """Encode a sequence and return a batch as an input for the model
         Return:
             Batch: a batch object containing the sentence, or none if something went wrong
@@ -527,7 +543,11 @@ class TextData:
 
         # First step: Divide the sentence in token
         tokens = nltk.word_tokenize(sentence)
-        if len(tokens) > self.args.maxLength:
+        if not ishistory:
+            hold = self.args.maxLength
+        else:
+            hold = 2*self.args.maxLength
+        if len(tokens) > hold:
             return None
 
         # Second step: Convert the token in word ids
