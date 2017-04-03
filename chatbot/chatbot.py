@@ -191,6 +191,7 @@ class Chatbot:
         trainingArgs.add_argument('--validate', type=int, default=0,
                                  help='if greater than 0, validating bleu score on validating samples with size --validate during training')
 
+        trainingArgs.add_argument('--maxTurns', type=int, default=5, help='RL model max simulation turns')
         return parser.parse_args(args)
 
     def main(self, args=None):
@@ -360,6 +361,7 @@ class Chatbot:
                     # Checkpoint
                     if self.globStep % self.args.saveEvery == 0:
                         self._saveSession(sess)
+
                 # *************************************************************************
                 # Calculating BLEU score on random validation set with size k=validate
                 if self.args.validate > 0:
@@ -505,6 +507,18 @@ class Chatbot:
 
         self._saveSession(sess)
 
+    def agentSimulation(self, sess, message):
+        q = []
+        p = []
+        candidates = self.historyPredict(message, nbest=True)
+        for i in range(self.args.maxTurns):
+            p.append(candidates)
+            qi = []
+            for j in range(len(p[i])):
+                qi.append(self.historyPredict(p[i][j]), nbest=True)
+            q.append(qi)
+        # TODO: calculate Rewards
+
     def predictTestset(self, sess):
         """ Try predicting the sentences from the samples.txt file.
         The sentences are saved on the modelDir under the same name
@@ -513,6 +527,8 @@ class Chatbot:
         """
         # TODO 1: Add evaluation function, such as BLEU score, diversity and other evaluation number
         # TODO 1: Create reference answers of the sample file, which will be helpful in evaluation
+        # TODO : 在history训练出的模型下（包括强化训练过程中也是使用history的），测试用例也需要处理出history用例，输入应为QA对，预测下一句，
+        # 并调用historyPredict，而不是singlePredict（加分支判断load模型的historyInput参数）
 
         # Loading the file to predict
         with open(os.path.join(self.args.rootDir, self.TEST_IN_NAME), 'r') as f:
@@ -557,6 +573,8 @@ class Chatbot:
         """
         # TODO 2: Also show the top 10 most likely predictions for each predicted output (when verbose mode?)
         # TODO 3: Log the questions asked for latter re-use (merge with test/samples.txt)
+        # TODO : 在history训练出的模型下（包括强化训练过程中也是使用history的），interactive测试也需要处理出history信息，
+        # 并调用historyPredict，而不是singlePredict（加分支判断load模型的historyInput参数）
 
         print('Testing: Launch interactive mode:')
         print('')
@@ -588,6 +606,8 @@ class Chatbot:
             sess: The current running session
         """
         # TODO 1: Implement agents test
+        # TODO : 在history训练出的模型下（包括强化训练过程中也是使用history的），interactive测试也需要处理出history信息，
+        # 并调用historyPredict，而不是singlePredict（默认load模型的historyInput参数为True）
         print('Testing: Launch agent mode:')
         print('')
         print('Welcome to the agent interactive mode, here you can propose a question to Deep Q&A 2-Agents. Don\'t '
@@ -632,6 +652,7 @@ class Chatbot:
         if not vld and rl == 0:
             ops, feedDict = self.model.step(batch)
             output = self.sess.run(ops[0], feedDict)
+            print(output)
         elif vld:
             ckpt = tf.train.get_checkpoint_state(self.modelDir)
             self.saver.restore(self.vldsess, ckpt.model_checkpoint_path)
@@ -655,12 +676,15 @@ class Chatbot:
         Return:
             str: the human readable sentence
         """
+        # daemon模式是后台运行模式，基本和interactive模式一致，不过是运行在server端，为客户端应用（如web）提供计算服务
+        # TODO : 在history训练出的模型下（包括强化训练过程中也是使用history的），daemon测试也需要处理出history信息，
+        # 并调用historyPredict，而不是singlePredict（在加载模型时检查historyInput参数，加分支判断）
         return self.textData.sequence2str(
             self.singlePredict(sentence),
             clean=True
         )
 
-    def historyPredict(self, question, questionSeq=None):
+    def historyPredict(self, question, questionSeq=None, vld=False, rl=0, nbest=False):
         """ Predict the sentence
         Args:
             question (str): the raw input sentence
@@ -677,10 +701,30 @@ class Chatbot:
             questionSeq.extend(batch.encoderSeqs)
 
         # Run the model
-        ops, feedDict = self.model.step(batch)
-        output = self.sess.run(ops[0], feedDict)
-        answer = self.textData.deco2sentence(output)
-
+        ops = None
+        output = None
+        if not vld and rl == 0:
+            ops, feedDict = self.model.step(batch)
+            output = self.sess.run(ops[0], feedDict)
+            print(output)
+        elif vld:
+            ckpt = tf.train.get_checkpoint_state(self.modelDir)
+            self.saver.restore(self.vldsess, ckpt.model_checkpoint_path)
+            ops, feedDict = self.vldmodel.step(batch)
+            output = self.vldsess.run(ops[0], feedDict)
+        elif rl == 1:
+            ops, feedDict = self.model.step(batch)
+            output = self.for2sess.run(ops[0], feedDict)
+        elif rl == 2:
+            ops, feedDict = self.backward.step(batch)
+            output = self.backsess.run(ops[0], feedDict)
+        if not nbest:
+            answer = self.textData.deco2sentence(output)
+        else:
+            candidates = self.model.decoder2Nbest(decoderOuts=output, N=self.args.mmiN)
+            answer = []
+            for can in candidates:
+                answer.append(self.textData.deco2sentence(can))
         return answer
 
     def daemonClose(self):
@@ -898,11 +942,22 @@ class Chatbot:
             print()
 
         # For now, not arbitrary  independent maxLength between encoder and decoder
-        if not self.args.historyInputs:
-            self.args.maxLengthEnco = self.args.maxLength
+        # h&w: ((pi,qi)|a)
+        # not h&not w: (a|pi)
+        # ** not h&w: (qi|a)
+        # ** h&not w: (a|(qi,pi))
+        if not self.args.watsonMode:
+            if not self.args.historyInputs:
+                self.args.maxLengthEnco = self.args.maxLength
+            else:
+                self.args.maxLengthEnco = 2*self.args.maxLength
+            self.args.maxLengthDeco = self.args.maxLength + 2
         else:
-            self.args.maxLengthEnco = 2*self.args.maxLength
-        self.args.maxLengthDeco = self.args.maxLength + 2
+            self.args.maxLengthEnco = self.args.maxLength
+            if not self.args.historyInputs:
+                self.args.maxLengthDeco = self.args.maxLength + 2
+            else:
+                self.args.maxLengthDeco = 2 * self.args.maxLength + 2
 
         if self.args.watsonMode:
             self.SENTENCES_PREFIX.reverse()
@@ -937,6 +992,7 @@ class Chatbot:
         config['Training (won\'t be restored)']['dropout'] = str(self.args.dropout)
         config['Training (won\'t be restored)']['mmiN'] = str(self.args.mmiN)
         config['Training (won\'t be restored)']['maxGradientNorm'] = str(self.args.maxGradientNorm)
+        config['Training (won\'t be restored)']['maxTurns'] = str(self.args.maxTurns)
 
         with open(os.path.join(self.modelDir, self.CONFIG_FILENAME), 'w') as configFile:
             config.write(configFile)

@@ -141,8 +141,8 @@ class Model:
 
                 return tf.cast(
                     tf.nn.sampled_softmax_loss(
-                        localWt,  # Should have shape [num_classes, dim]
-                        localB,
+                        localWt,  # Should have shape [num_classes, dim] 从更大维度映射到指定维度，即从整体词集映射到sample大小词集
+                        localB,   # [dim]
                         labels,
                         localInputs,
                         self.args.softmaxSamples,  # The number of classes to randomly sample per batch

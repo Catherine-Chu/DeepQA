@@ -68,8 +68,30 @@ list
   ……
   list1-12：[[ ],[ ]]
 ]
+
+还应注意到原始的output中存在负数，基本可以肯定其并不代表概率，要想使其代表概率，应该使用softmax函数，将output映射为同等大小的概率矩阵
+在设置softmaxSample的情况下output是做了projection的，需测试在有该参数的模型在，预测时输出的output是否就不存在负数了?
+经测试发现还是有，在model中的output projection函数中对一个词的output做的映射方法是wx+b，并不能保证映射为大于0的概率，可能是其根本原因？
+或许这里的wx+b应该换成softmax函数？不是很确定。
+应该理解为output是没有做projection之前的结果，在model中projection是仅在计算loss中做的，在计算loss中选取softmax(output)
+之后概率最大的作为loss的计算对象，并没有改变output原始结果，所以如果想表示output概率，需要自己再做一遍softmax计算
+不过这个计算量如果不优化的话可能会比较大。就因为这种计算量很大所以才会采用samplesoftmax进行高维到低维的映射之后再计算softmax，也就是w，b的
+作用，可以参考一下tf.nn.sampled_softmax_loss这里的实现看一下
 """
 
+# TODO: 需要定义一个projection函数softmax用于从output到概率的映射
+'''
+基本思路
+w = tf.Variable(tf.zeros([784,10])) #定义w维度是:[784,10],初始值是0
+b = tf.Variable(tf.zeros([10])) # 定义b维度是:[10],初始值是0
+
+y = tf.nn.softmax(tf.matmul(x,w) + b)
+参考http://blog.csdn.net/sa14023053/article/details/51884894
+MNIST模型 softmax回归
+
+wx+b => f(x) => output
+y=tf.nn.softmax(output)
+'''
 
 # 首先要处理掉decoderOutputs的batch
 def splitOutBatches(decoderOuts):
