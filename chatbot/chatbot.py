@@ -336,31 +336,31 @@ class Chatbot:
                 print("----- Epoch {}/{} ; (lr={}) -----".format(e + 1, self.args.numEpochs, self.args.learningRate))
                 perfFile.write("----- Epoch {}/{} -----".format(e + 1, self.args.numEpochs) + "\n")
 
-                batches = self.textData.getBatches()
-
-                # TODO 2: Also update learning parameters eventually
-
+                # batches = self.textData.getBatches()
+                #
+                # # TODO 2: Also update learning parameters eventually
+                #
                 tic = datetime.datetime.now()
-
-                for nextBatch in tqdm(batches, desc="Training"):
-                    # Training pass
-                    ops, feedDict = self.model.step(nextBatch)
-
-                    assert len(ops) == 2  # training, loss
-                    _, loss, summary = sess.run(ops + (mergedSummaries,), feedDict)
-                    self.writer.add_summary(summary, self.globStep)
-                    self.globStep += 1
-
-                    # Output training status
-                    if self.globStep % 200 == 0:
-                        perplexity = math.exp(float(loss)) if loss < 300 else float("inf")
-                        tqdm.write("----- Step %d -- Loss %.2f -- Perplexity %.2f" % (self.globStep, loss, perplexity))
-                        perfFile.write(
-                            "----- Step %d -- Loss %.2f -- Perplexity %.2f\n" % (self.globStep, loss, perplexity))
-
-                    # Checkpoint
-                    if self.globStep % self.args.saveEvery == 0:
-                        self._saveSession(sess)
+                #
+                # for nextBatch in tqdm(batches, desc="Training"):
+                #     # Training pass
+                #     ops, feedDict = self.model.step(nextBatch)
+                #
+                #     assert len(ops) == 2  # training, loss
+                #     _, loss, summary = sess.run(ops + (mergedSummaries,), feedDict)
+                #     self.writer.add_summary(summary, self.globStep)
+                #     self.globStep += 1
+                #
+                #     # Output training status
+                #     if self.globStep % 200 == 0:
+                #         perplexity = math.exp(float(loss)) if loss < 300 else float("inf")
+                #         tqdm.write("----- Step %d -- Loss %.2f -- Perplexity %.2f" % (self.globStep, loss, perplexity))
+                #         perfFile.write(
+                #             "----- Step %d -- Loss %.2f -- Perplexity %.2f\n" % (self.globStep, loss, perplexity))
+                #
+                #     # Checkpoint
+                #     if self.globStep % self.args.saveEvery == 0:
+                #         self._saveSession(sess)
 
                 # *************************************************************************
                 # Calculating BLEU score on random validation set with size k=validate
@@ -376,17 +376,21 @@ class Chatbot:
                         targetSeqs = vldbatch[1]
                         question = self.textData.sequence2str(inputSeqs, clean=True)
                         questionSeq = []
+                        print(question)
                         answer = self.singlePredict(question, questionSeq, vld=True)
                         # ref = self.textData.sequence2str(answer, clean=True).split()
                         ref = nltk.word_tokenize(self.textData.sequence2str(answer, clean=True))
+                        print(ref)
                         refs.append([ref])
                         # hyp = self.textData.sequence2str(targetSeqs, clean=True).split()
                         hyp = nltk.word_tokenize(self.textData.sequence2str(targetSeqs, clean=True))
+                        print(hyp)
                         hyps.append(hyp)
-                        bleu = bleu_score.sentence_bleu([ref], hyp, smoothing_function=bleu_score.SmoothingFunction().method2)
+                        bleu = bleu_score.sentence_bleu([ref], hyp, smoothing_function=bleu_score.SmoothingFunction().method2, weights=[0.75, 0.25, 0, 0])
+                        print(bleu)
                         average_bleu += bleu
                     average_bleu /= len(self.textData.validatingSamples)
-                    corpus_bleu = bleu_score.corpus_bleu(refs, hyps, smoothing_function=bleu_score.SmoothingFunction().method2)
+                    corpus_bleu = bleu_score.corpus_bleu(refs, hyps, smoothing_function=bleu_score.SmoothingFunction().method2, weights=[0.75, 0.25, 0, 0])
                     tqdm.write(
                         "----- Epoch %d -- Average BLEU %.4f -- Corpus BLEU %.4f" % (e + 1, average_bleu, corpus_bleu))
                     perfFile.write(
@@ -993,6 +997,7 @@ class Chatbot:
         config['Training (won\'t be restored)']['mmiN'] = str(self.args.mmiN)
         config['Training (won\'t be restored)']['maxGradientNorm'] = str(self.args.maxGradientNorm)
         config['Training (won\'t be restored)']['maxTurns'] = str(self.args.maxTurns)
+        config['Training (won\'t be restored)']['validate'] = str(self.args.validate)
 
         with open(os.path.join(self.modelDir, self.CONFIG_FILENAME), 'w') as configFile:
             config.write(configFile)

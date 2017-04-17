@@ -368,7 +368,7 @@ class TextData:
             if inputWords and targetWords:  # Filter wrong samples (if one of the list is empty)
                 self.trainingSamples.append([inputWords, targetWords])
 
-    def extractHistoryConversation(self, conversation, method=2):
+    def extractHistoryConversation(self, conversation, method=1):
         """Extract the sample lines from the conversations
         Args:
             conversation (Obj): a conversation object containing the lines to extract
