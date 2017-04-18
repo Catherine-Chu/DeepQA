@@ -46,7 +46,6 @@ class ProjectionOp:
             self.W = tf.get_variable(
                 'weights',
                 shape,
-                # initializer=tf.truncated_normal_initializer()  # TODO: Tune value (fct of input size: 1/sqrt(input_dim))
                 dtype=dtype
             )
             self.b = tf.get_variable(
@@ -158,18 +157,10 @@ class Model:
 
         # Network input (placeholders)
 
-        # tensor的shape参数为一个张量，张量的阶可以理解为维数；
-        # 0维[]表示纯量，即数；1维[i]表示向量，如[2]=>[3,9]；2维[i,j]表示矩阵，如[2,3]=>[[1,2,3],[4,5,6]]
-        # None表示任意大小，空表示???表示0维即纯量，那[None,]和[None]是否一样呢？
-        # 经实验证明[3,]与[3]完全一致，故推断[None,]与[None]含义相同，比较此处与tesorflow官方代码可知传入embedding_attention的参数类型
-        # 几乎没有任何不同，说明之前关于数据维度过大导致显存内存占用剧增的推断应该不正确
-        # 那么下一个不同的地方就是target的赋值，官方代码中target做了左偏移，后来又补充一位；
-        # 还有一个不同是是否使用bucket，但是根据目前的了解使用只会提高运算速度，不应该可以减少内存占用？？？？这个问题很疑惑
         with tf.name_scope('placeholder_encoder'):
             self.encoderInputs = [tf.placeholder(tf.int32, [None, ]) for _ in
                                   range(self.args.maxLengthEnco)]  # Batch size * sequence length * input dim
-            # [None,] batch_size,input dim
-            # self.args.maxLengthEnco sequence length
+
 
         with tf.name_scope('placeholder_decoder'):
             self.decoderInputs = [tf.placeholder(tf.int32, [None, ], name='inputs') for _ in
@@ -179,18 +170,6 @@ class Model:
             self.decoderWeights = [tf.placeholder(tf.float32, [None, ], name='weights') for _ in
                                    range(self.args.maxLengthDeco)]
 
-        # Define the network
-        # Here we use an embedding model, it takes integer as input and convert them into word vector for
-        # better word representation
-
-        # original system use embedding method only and can be improved by using attention, which could
-        # improve the ability on longer sentences predictions.  *** embedding_attention_seq2seq ***
-
-        # 注意如果要改成embedding_attention_seq2seq,其使用get_variable创建的变量name会不同（因为scope不同），直接运行
-        # 会报错：ValueError: Variable embedding_rnn_seq2seq/rnn/embedding_wrapper/embedding does not exist,
-        # or was not created with tf.get_variable(). Did you mean to set reuse=None in VarScope?
-        # 即initEmbedding操作时reuse的变量不存在，应该加一个useAttention参数，并判断参数进行initEmbedding处的embedding
-        # resign操作
 
         if not self.args.useAttentions:
             decoderOutputs, states = tf.contrib.legacy_seq2seq.embedding_rnn_seq2seq(
@@ -206,14 +185,6 @@ class Model:
                 # When we test (self.args.test), we use previous output as next input (feed_previous)
             )
         else:
-            # Enable attentions mechanism, solve the problem of oom. Maybe could be solved by using buckets model.
-            # Or maybe the problem is that inputs in a batch don't have the same length, that means we forgot the
-            # padding operations, so that the dynamic model can't handle it. The bucket model can improve performance
-            # by clustering the inputs which have similar length together. And it isn't necessary if we are not concern
-            # about speed.
-            # 在textdata里_createBatch中做了padding操作，问题就不在这里了。
-            # 找到问题所在，attention必须配合Sampled softmax使用，可设置sample数目为256，可以明显看到计算速度比无attention机制时慢但是
-            # 可以像tf官方model一样运行。
             decoderOutputs, states = tf.contrib.legacy_seq2seq.embedding_attention_seq2seq(
                 self.encoderInputs,
                 self.decoderInputs,
@@ -240,9 +211,7 @@ class Model:
         # For training only
         else:
             # Finally, we define the loss function
-            # tf0.12 and before:self.lossFct = tf.nn.seq2seq.sequence_loss(decoderOutputs, self.decoderTargets,
-            #                                                        self.decoderWeights,
-            #                                                        self.textData.getVocabularySize())
+
             self.lossFct = tf.contrib.legacy_seq2seq.sequence_loss(
                 decoderOutputs,
                 self.decoderTargets,
@@ -251,7 +220,6 @@ class Model:
                 softmax_loss_function=sampledSoftmax if outputProjection else None  # If None, use default SoftMax
             )
             tf.summary.scalar('loss', self.lossFct)  # Keep track of the cost
-            # tf0.12 and before:tf.scalar_summary('loss', self.lossFct)  # Keep track of the cost
 
             # Initialize the optimizer
             opt = tf.train.AdamOptimizer(

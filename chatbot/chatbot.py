@@ -165,18 +165,11 @@ class Chatbot:
         if not self.args.rootDir:
             self.args.rootDir = os.getcwd()  # Use the current working directory
 
-        # tf.logging.set_verbosity(tf.logging.INFO) # DEBUG, INFO, WARN (default), ERROR, or FATAL
-
         self.loadModelParams()
-        # Update the self.modelDir and self.globStep, for now, not used when loading Model
-        # (but need to be called before _getSummaryName)
+
 
         self.textData = TextData(self.args)
-        # TODO: Add a mode where we can force the input of the decoder // Try to visualize the predictions for
-        # each word of the vocabulary / decoder input
-        # TODO: For now, the model are trained for a specific dataset (because of the maxLength which define the
-        # vocabulary). Add a compatibility mode which allow to launch a model trained on a different vocabulary (
-        # remap the word2id/id2word variables).
+
         if self.args.createDataset:
             print('Dataset created! Thanks for using this program')
             return  # No need to go further
@@ -189,21 +182,14 @@ class Chatbot:
         # tf0.12 and before:self.writer = tf.train.SummaryWriter(self._getSummaryName())
         self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=200)  # Arbitrary limit ?
 
-        # TODO: Fixed seed (WARNING: If dataset shuffling, make sure to do that after saving the
-        # dataset, otherwise, all which cames after the shuffling won't be replicable when
-        # reloading the dataset). How to restore the seed after loading ??
-        # Also fix seed for random.shuffle (does it works globally for all files ?)
 
         # Running session
         config = tf.ConfigProto(allow_soft_placement=True)
-        # Add by wenjie: limit the gpu
         config.gpu_options.allow_growth = True
         self.sess = tf.Session(config=config)
-        # TODO: Replace all sess by self.sess (not necessary a good idea) ?
 
         print('Initialize variables...')
         self.sess.run(tf.global_variables_initializer())
-        # tf0.12 and before:self.sess.run(tf.initialize_all_variables())
 
         # Reload the model eventually (if it exist.), on testing mode,
         # the models are not loaded here (but in predictTestset)
@@ -253,7 +239,6 @@ class Chatbot:
         self.textData.makeLighter(self.args.ratioDataset)  # Limit the number of training samples
 
         mergedSummaries = tf.summary.merge_all()
-        # tf0.12 and before:mergedSummaries = tf.merge_all_summaries()  # Define the summary operator (Warning: Won't appear on the tensorboard graph)
         if self.globStep == 0:  # Not restoring from previous run
             self.writer.add_graph(sess.graph)  # First time only
 
