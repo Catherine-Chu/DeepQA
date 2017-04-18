@@ -29,11 +29,14 @@ import os  # Files management
 import numpy as np
 import math
 import tensorflow as tf
+import nltk
 
 from tqdm import tqdm  # Progress bar
 
 from chatbot.textdata import TextData
 from chatbot.model import Model
+from nltk.translate import bleu_score
+
 
 
 class Chatbot:
@@ -289,10 +292,21 @@ class Chatbot:
         Args:
             sess: The current running session
         """
+        lines = []
+        hypseqs = []
+        refs = []
+        hyps = []
+        average_bleu = 0
+        flag = self.textData.loadTestData(self.textData.testSamplesDir)
+        if not flag:
+            # Loading the file to predict
+            with open(os.path.join(self.args.rootDir, self.TEST_IN_NAME), 'r') as f:
+                lines = f.readlines()
+        else:
+            for sample in self.textData.testingSamples:
+                lines.append(self.textData.sequence2str(sample[0], clean=True))
+                hypseqs.append(self.textData.sequence2str(sample[1], clean=True))
 
-        # Loading the file to predict
-        with open(os.path.join(self.args.rootDir, self.TEST_IN_NAME), 'r') as f:
-            lines = f.readlines()
 
         modelList = self._getModelList()
         if not modelList:
@@ -310,20 +324,47 @@ class Chatbot:
                 self.MODEL_EXT)] + self.TEST_OUT_SUFFIX  # We remove the model extension and add the prediction suffix
             with open(saveName, 'w') as f:
                 nbIgnored = 0
+                index = 0
                 for line in tqdm(lines, desc='Sentences'):
-                    question = line[:-1]  # Remove the endl character
+                    if not flag:
+                        question = line[:-1]  # Remove the endl character
+                    else:
+                        question = line
 
                     answer = self.singlePredict(question)
                     if not answer:
                         nbIgnored += 1
                         continue  # Back to the beginning, try again
 
-                    predString = '{x[0]}{0}\n{x[1]}{1}\n\n'.format(question,
-                                                                   self.textData.sequence2str(answer, clean=True),
-                                                                   x=self.SENTENCES_PREFIX)
+                    if not flag:
+                        predString = '{x[0]}{0}\n{x[1]}{1}\n\n'.format(question,
+                                                                       self.textData.sequence2str(answer, clean=True),
+                                                                       x=self.SENTENCES_PREFIX)
+                    else:
+                        predString ='{x[0]}{0}\n{x[1]}{1}\n{y}{2}\n\n'.format(question,
+                                                                       self.textData.sequence2str(answer, clean=True),
+                                                                       hypseqs[index],
+                                                                       x=self.SENTENCES_PREFIX, y='T: ')
+
+                        ref = nltk.word_tokenize(self.textData.sequence2str(answer, clean=True))
+                        refs.append([ref])
+                        hyp = nltk.word_tokenize(hypseqs[index])
+                        hyps.append(hyp)
+                        bleu = bleu_score.sentence_bleu([ref], hyp, smoothing_function=bleu_score.SmoothingFunction().method2, weights=[0.3, 0.3, 0.2, 0.2])
+                        predString= predString+ ("Sentence BLEU %.4f\n\n" % (bleu))
+
+                        average_bleu += bleu
+
                     if self.args.verbose:
                         tqdm.write(predString)
                     f.write(predString)
+                    index += 1
+                if flag:
+                    average_bleu /= (len(lines)-nbIgnored)
+                    corpus_bleu = bleu_score.corpus_bleu(refs, hyps,
+                                                         smoothing_function=bleu_score.SmoothingFunction().method2,
+                                                         weights=[0.3, 0.3, 0.2, 0.2])
+                    f.write("Average BLEU %.4f, Corpus BLEU %.4f.\n" % (average_bleu, corpus_bleu))
                 print('Prediction finished, {}/{} sentences ignored (too long)'.format(nbIgnored, len(lines)))
 
     def mainTestInteractive(self, sess):
