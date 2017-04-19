@@ -80,6 +80,7 @@ class TextData:
         # Path variables
         self.corpusDir = os.path.join(self.args.rootDir, 'data', self.args.corpus)
         self.samplesDir = os.path.join(self.args.rootDir, 'data/samples/')
+        self.testSamplesDir = os.path.join(self.args.rootDir, 'data/test')
         self.samplesName = self._constructName()
 
         self.padToken = -1  # Padding
@@ -91,12 +92,12 @@ class TextData:
         self.trainingSamples = []  # train set
         self.validatingSamples = []  # validate set used to calculate evaluation score on train samples
         self.developSamples = []  # development set used to choose best parameters and re-training
-        self.testSamples = []  # test set
+        self.testingSamples = [] # test set
 
         self.word2id = {}
         self.id2word = {}  # For a rapid conversion
 
-        self.loadCorpus(self.samplesDir)
+        self.loadCorpus(self.samplesDir, self.testSamplesDir)
 
         # Plot some stats:
         print('Loaded {} : {} words, {} QA in training set'.format(self.args.corpus, len(self.word2id), len(self.trainingSamples)))
@@ -257,7 +258,7 @@ class TextData:
         Return:
             list: Size of 4 type samples set, 0 for train, 1 for validate, 2 for develop, 3 for test
         """
-        sample_size = [len(self.trainingSamples), len(self.validatingSamples), len(self.developSamples), len(self.testSamples)]
+        sample_size = [len(self.trainingSamples), len(self.validatingSamples), len(self.developSamples), len(self.testingSamples)]
         return sample_size
 
     def getVocabularySize(self):
@@ -267,7 +268,7 @@ class TextData:
         """
         return len(self.word2id)
 
-    def loadCorpus(self, dirName):
+    def loadCorpus(self, dirName, testDirName = None):
         """Load/create the conversations data
         Args:
             dirName (str): The directory where to load/save the model
@@ -292,14 +293,39 @@ class TextData:
 
             # Saving
             print('Saving dataset...')
-            self.saveDataset(dirName)  # Saving tf samples
+            if not testDirName:
+                self.saveDataset(dirName)  # Saving tf samples
+            else:
+                self.saveDataset(dirName, testDirName)
         else:
             print('Loading dataset from {}...'.format(dirName))
             self.loadDataset(dirName)
 
         assert self.padToken == 0
 
-    def saveDataset(self, dirName):
+    def loadTestData(self, testDirName):
+        """Load/create the conversations data
+        Args:
+            dirName (str): The directory where to load/save the model
+        """
+        datasetExist = False
+        if os.path.exists(os.path.join(testDirName, 'test'+self.samplesName)):
+            datasetExist = True
+
+        if not datasetExist:  # First time we load the database: creating all files
+            print('Testing samples not found. Use default samples and ignore valuations.')
+            return False
+        else:
+            print('Loading dataset from {}...'.format(testDirName))
+            with open(os.path.join(testDirName, 'test'+self.samplesName), 'rb') as handle:
+                data = pickle.load(handle)
+                self.testingSamples = data["testingSamples"]
+
+        assert self.padToken == 0
+
+        return True
+
+    def saveDataset(self, dirName, testDirName = None):
         """Save samples to file
         Args:
             dirName (str): The directory where to load/save the model
@@ -313,6 +339,12 @@ class TextData:
                 # "validatingSamples": self.validatingSamples
             }
             pickle.dump(data, handle, -1)  # Using the highest protocol available
+        if testDirName:
+            with open(os.path.join(testDirName, 'test'+self.samplesName), 'wb') as t_handle:
+                testData = {
+                    "testingSamples": self.testingSamples
+                }
+                pickle.dump(testData, t_handle, -1)  # Using the highest protocol available
 
     def loadDataset(self, dirName):
         """Load samples from file
@@ -341,16 +373,33 @@ class TextData:
         self.unknownToken = self.getWordId("<unknown>")  # Word dropped from vocabulary
 
         # Preprocessing data
+
+        testNum = len(conversations)/10
         if not self.args.historyInputs:
+            count = 1
+
             for conversation in tqdm(conversations, desc="Extract conversations"):
-                self.extractConversation(conversation)
+                if count <= testNum:
+                    self.extractConversation(conversation, isTestSample=True)
+                else:
+                    self.extractConversation(conversation)
+                count += 1
                 # The dataset will be saved in the same order it has been extracted
             # self.validatingSamples.extend(random.sample(self.trainingSamples, 2000))
         else:
+            counts = 1
+
+            for conversation in tqdm(conversations, desc="Extract conversations"):
+                if counts <= testNum:
+                    self.extractHistoryConversation(conversation, isTestSample=True)
+                else:
+                    self.extractHistoryConversation(conversation)
+                counts += 1
             for conversation in tqdm(conversations, desc="Extract conversations"):
                 self.extractHistoryConversation(conversation)
+            # The dataset will be saved in the same order it has been extracted
 
-    def extractConversation(self, conversation):
+    def extractConversation(self, conversation, isTestSample = False):
         """Extract the sample lines from the conversations
         Args:
             conversation (Obj): a conversation object containing the lines to extract
@@ -366,9 +415,12 @@ class TextData:
             targetWords = self.extractText(targetLine["text"], isTarget=True)
 
             if inputWords and targetWords:  # Filter wrong samples (if one of the list is empty)
-                self.trainingSamples.append([inputWords, targetWords])
+                if not isTestSample:
+                    self.trainingSamples.append([inputWords, targetWords])
+                else:
+                    self.testingSamples.append([inputWords, targetWords])
 
-    def extractHistoryConversation(self, conversation, method=1):
+    def extractHistoryConversation(self, conversation, method=1,isTestSample = False):
         """Extract the sample lines from the conversations
         Args:
             conversation (Obj): a conversation object containing the lines to extract
@@ -391,7 +443,10 @@ class TextData:
             targetWords = self.extractText(targetLine["text"], isTarget=True)
 
             if inputWords1 and targetWords:  # Filter wrong samples (if one of the list is empty)
-                self.trainingSamples.append([inputWords1, targetWords])
+                if not isTestSample:
+                    self.trainingSamples.append([inputWords1, targetWords])
+                else:
+                    self.testingSamples.append([inputWords1, targetWords])
 
     def extractText(self, line, isTarget=False, ishistory = False):
         """Extract the words from a sample lines
