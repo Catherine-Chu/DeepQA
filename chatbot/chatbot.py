@@ -37,7 +37,7 @@ from nltk.translate import bleu_score
 from chatbot.textdata import TextData
 from chatbot.model import Model
 from nltk.translate import bleu_score
-
+from chatbot.textdata import Batch
 
 
 class Chatbot:
@@ -56,7 +56,7 @@ class Chatbot:
         """ Simple structure representing the different RL training methods
         """
         SEQ2SEQ = 'seq2seq'
-        MUTUALINFO ='mutualinfo'
+        MUTUALINFO = 'mutualinfo'
         REINFORCEMENT = 'reinforcement'
 
     class ModelTag:
@@ -121,7 +121,8 @@ class Chatbot:
                                      ' use daemon mode to integrate the chatbot in another program')
         globalArgs.add_argument('--train',
                                 nargs='?',
-                                choices=[Chatbot.TrainMode.SEQ2SEQ, Chatbot.TrainMode.MUTUALINFO, Chatbot.TrainMode.REINFORCEMENT],
+                                choices=[Chatbot.TrainMode.SEQ2SEQ, Chatbot.TrainMode.MUTUALINFO,
+                                         Chatbot.TrainMode.REINFORCEMENT],
                                 const=Chatbot.TrainMode.SEQ2SEQ, default=None,
                                 help='if present, launch the program try to train the model based on pre-trained model(s)(if exist);'
                                      'in seq2seq mode, train the model with default method;'
@@ -138,7 +139,8 @@ class Chatbot:
         globalArgs.add_argument('--keepAll', type=int, default=10,
                                 help='If this option is set, limited size saved model will be keep (Warning: make sure you have enough free disk space or increase saveEvery)')
         globalArgs.add_argument('--modelTag', nargs='?',
-                                choices=[Chatbot.ModelTag.SEQ2SEQ_TAG, Chatbot.ModelTag.BACKWARD_TAG, Chatbot.ModelTag.POLICY_RL_TAG],
+                                choices=[Chatbot.ModelTag.SEQ2SEQ_TAG, Chatbot.ModelTag.BACKWARD_TAG,
+                                         Chatbot.ModelTag.POLICY_RL_TAG],
                                 const=Chatbot.ModelTag.SEQ2SEQ_TAG, default=None,
                                 help='tag to differentiate which model to store/load')
         globalArgs.add_argument('--rootDir', type=str, default=None,
@@ -189,11 +191,14 @@ class Chatbot:
         trainingArgs.add_argument('--learningRate', type=float, default=0.001, help='Learning rate')
         trainingArgs.add_argument('--dropout', type=float, default=0.9, help='Dropout rate (keep probabilities)')
         trainingArgs.add_argument('--mmiN', type=int, default=10, help='MMI model n-best parameter N')
-        trainingArgs.add_argument('--maxGradientNorm', type=float, default=5.0, help='Clip gradients to this norm in SGD optimizer')
+        trainingArgs.add_argument('--maxGradientNorm', type=float, default=5.0,
+                                  help='Clip gradients to this norm in SGD optimizer')
         trainingArgs.add_argument('--validate', type=int, default=0,
-                                 help='if greater than 0, validating bleu score on validating samples with size --validate during training')
+                                  help='if greater than 0, validating bleu score on validating samples with size --validate during training')
 
         trainingArgs.add_argument('--maxTurns', type=int, default=5, help='RL model max simulation turns')
+        trainingArgs.add_argument('--discount', type=float, default=1, help='RL reward discount parameter')
+
         return parser.parse_args(args)
 
     def main(self, args=None):
@@ -212,7 +217,6 @@ class Chatbot:
             self.args.rootDir = os.getcwd()  # Use the current working directory
 
         self.loadModelParams()
-
 
         self.textData = TextData(self.args)
 
@@ -237,13 +241,11 @@ class Chatbot:
                     self.backward = Model(self.args, self.textData)
                 self.args.test = False
 
-
         # Saver/summaries
         self.writer = tf.summary.FileWriter(self._getSummaryName())
         # tf0.12 and before:self.writer = tf.train.SummaryWriter(self._getSummaryName())
 
         self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=self.args.keepAll)
-
 
         # Running session
         config = tf.ConfigProto(allow_soft_placement=True)
@@ -255,7 +257,6 @@ class Chatbot:
         if self.args.train == Chatbot.TrainMode.MUTUALINFO or self.args.train == Chatbot.TrainMode.REINFORCEMENT:
             self.for2sess = tf.Session(config=config)
             self.backsess = tf.Session(config=config)
-
 
         print('Initialize variables...')
         self.sess.run(tf.global_variables_initializer())
@@ -301,13 +302,18 @@ class Chatbot:
             else:
                 raise RuntimeError('Unknown train mode: {}'.format(self.args.train))  # Should never happen
         else:
-            print('Warning: Unknown program state, you need to use either --train or --test argument.')  # Should never happen
+            print(
+                'Warning: Unknown program state, you need to use either --train or --test argument.')  # Should never happen
 
         if self.args.test != Chatbot.TestMode.DAEMON:
             self.sess.close()
             if self.args.train and self.args.validate > 0:
                 self.vldsess.close()
             print("The End! Thanks for using this program")
+
+    '''
+    训练相关函数
+    '''
 
     def mainTrain(self, sess):
         """ Training loop
@@ -336,31 +342,31 @@ class Chatbot:
                 print("----- Epoch {}/{} ; (lr={}) -----".format(e + 1, self.args.numEpochs, self.args.learningRate))
                 perfFile.write("----- Epoch {}/{} -----".format(e + 1, self.args.numEpochs) + "\n")
 
-                # batches = self.textData.getBatches()
-                #
-                # # TODO 2: Also update learning parameters eventually
-                #
+                batches = self.textData.getBatches()
+
+                # TODO 2: Also update learning parameters eventually
+
                 tic = datetime.datetime.now()
-                #
-                # for nextBatch in tqdm(batches, desc="Training"):
-                #     # Training pass
-                #     ops, feedDict = self.model.step(nextBatch)
-                #
-                #     assert len(ops) == 2  # training, loss
-                #     _, loss, summary = sess.run(ops + (mergedSummaries,), feedDict)
-                #     self.writer.add_summary(summary, self.globStep)
-                #     self.globStep += 1
-                #
-                #     # Output training status
-                #     if self.globStep % 200 == 0:
-                #         perplexity = math.exp(float(loss)) if loss < 300 else float("inf")
-                #         tqdm.write("----- Step %d -- Loss %.2f -- Perplexity %.2f" % (self.globStep, loss, perplexity))
-                #         perfFile.write(
-                #             "----- Step %d -- Loss %.2f -- Perplexity %.2f\n" % (self.globStep, loss, perplexity))
-                #
-                #     # Checkpoint
-                #     if self.globStep % self.args.saveEvery == 0:
-                #         self._saveSession(sess)
+
+                for nextBatch in tqdm(batches, desc="Training"):
+                    # Training pass
+                    ops, feedDict = self.model.step(nextBatch)
+
+                    assert len(ops) == 2  # training, loss
+                    _, loss, summary = sess.run(ops + (mergedSummaries,), feedDict)
+                    self.writer.add_summary(summary, self.globStep)
+                    self.globStep += 1
+
+                    # Output training status
+                    if self.globStep % 200 == 0:
+                        perplexity = math.exp(float(loss)) if loss < 300 else float("inf")
+                        tqdm.write("----- Step %d -- Loss %.2f -- Perplexity %.2f" % (self.globStep, loss, perplexity))
+                        perfFile.write(
+                            "----- Step %d -- Loss %.2f -- Perplexity %.2f\n" % (self.globStep, loss, perplexity))
+
+                    # Checkpoint
+                    if self.globStep % self.args.saveEvery == 0:
+                        self._saveSession(sess)
 
                 # *************************************************************************
                 # Calculating BLEU score on random validation set with size k=validate
@@ -378,23 +384,26 @@ class Chatbot:
                         questionSeq = []
                         print(question)
                         answer = self.singlePredict(question, questionSeq, vld=True)
-                        # ref = self.textData.sequence2str(answer, clean=True).split()
                         ref = nltk.word_tokenize(self.textData.sequence2str(answer, clean=True))
                         print(ref)
                         refs.append([ref])
-                        # hyp = self.textData.sequence2str(targetSeqs, clean=True).split()
                         hyp = nltk.word_tokenize(self.textData.sequence2str(targetSeqs, clean=True))
                         print(hyp)
                         hyps.append(hyp)
-                        bleu = bleu_score.sentence_bleu([ref], hyp, smoothing_function=bleu_score.SmoothingFunction().method2, weights=[0.75, 0.25, 0, 0])
+                        bleu = bleu_score.sentence_bleu([ref], hyp,
+                                                        smoothing_function=bleu_score.SmoothingFunction().method2,
+                                                        weights=[0.3, 0.3, 0.2, 0.2])
                         print(bleu)
                         average_bleu += bleu
                     average_bleu /= len(self.textData.validatingSamples)
-                    corpus_bleu = bleu_score.corpus_bleu(refs, hyps, smoothing_function=bleu_score.SmoothingFunction().method2, weights=[0.75, 0.25, 0, 0])
+                    corpus_bleu = bleu_score.corpus_bleu(refs, hyps,
+                                                         smoothing_function=bleu_score.SmoothingFunction().method2,
+                                                         weights=[0.3, 0.3, 0.2, 0.2])
                     tqdm.write(
                         "----- Epoch %d -- Average BLEU %.4f -- Corpus BLEU %.4f" % (e + 1, average_bleu, corpus_bleu))
                     perfFile.write(
-                        "----- Epoch %d -- Average BLEU %.4f -- Corpus BLEU %.4f\n" % (e + 1, average_bleu, corpus_bleu))
+                        "----- Epoch %d -- Average BLEU %.4f -- Corpus BLEU %.4f\n" % (
+                            e + 1, average_bleu, corpus_bleu))
                     self.args.test = False
                 # ************************************************************************
                 toc = datetime.datetime.now()
@@ -439,6 +448,7 @@ class Chatbot:
 
                 # TODO 1: Implement Mutual Information model Training using mutual information score
                 # Mutual information score definition(using in new object function)
+
                 toc = datetime.datetime.now()
 
                 print("Epoch finished in {}".format(
@@ -453,53 +463,142 @@ class Chatbot:
         Args:
             sess: The current running session
         """
+
         self.textData.makeLighter(self.args.ratioDataset)  # Limit the number of training samples
 
         mergedSummaries = tf.summary.merge_all()
 
-        # TODO 1:
-        # if mode changed from mmi to rl
-        #   self.globStep = 0
-        #   writer.re_add_graph(sess.graph)
-        # 这里有可能不需要re_add,只要让计算图一开始就足够大就行，不过globalStep应该重置
         if self.globStep == 0:
             self.writer.add_graph(sess.graph)
 
         print('Start reinforcement training (press Ctrl+C to save and exit)...')
         try:
-            # TODO 1: Not sure whether numEpochs could be used
+            modelPath1 = os.path.join(self.args.rootDir,
+                                      self.MODEL_DIR_BASE) + '-' + Chatbot.ModelTag.SEQ2SEQ_TAG
+            ckpt1 = tf.train.get_checkpoint_state(modelPath1)
+            self.saver.restore(self.for2sess, ckpt1.model_checkpoint_path)
+            modelPath2 = os.path.join(self.args.rootDir,
+                                      self.MODEL_DIR_BASE) + '-' + Chatbot.ModelTag.BACKWARD_TAG
+            ckpt2 = tf.train.get_checkpoint_state(modelPath2)
+            self.saver.restore(self.backsess, ckpt2.model_checkpoint_path)
+
+            def calculateReward(inputSeqs, outdist, outp, targetSeqs):
+                '''
+
+                :param inputSeqs: Batch
+                :param targetSeqs: log(softmaxP) matrix
+                :return: rewards on actions
+                '''
+                # Seq2Seq Model p(a|q)
+                question = self.textData.sequence2str(inputSeqs, clean=True)
+                questionSeq = []
+                answer = self.singlePredict(question, questionSeq, rl=1)
+                # Seq2Seq backward model p(q|a)
+                backques = self.textData.sequence2str(targetSeqs, clean=True)
+                backquesSeq = []
+                origin = self.singlePredict(backques, backquesSeq, rl=2)
+
             for e in range(self.args.numEpochs):
                 print()
                 print("----- Epoch {}/{} ; (lr={}) -----".format(e + 1, self.args.numEpochs, self.args.learningRate))
 
                 tic = datetime.datetime.now()
 
-                # TODO 1: Implement Resistance Reinforcement Training between 2 agents
-                # Reward Definition: Ease of answering & Information flow & semantic coherence
-                modelPath1 = os.path.join(self.args.rootDir,
-                                          self.MODEL_DIR_BASE) + '-' + Chatbot.ModelTag.SEQ2SEQ_TAG
-                ckpt1 = tf.train.get_checkpoint_state(modelPath1)
-                self.saver.restore(self.for2sess, ckpt1.model_checkpoint_path)
-                modelPath2 = os.path.join(self.args.rootDir,
-                                          self.MODEL_DIR_BASE) + '-' + Chatbot.ModelTag.BACKWARD_TAG
-                ckpt2 = tf.train.get_checkpoint_state(modelPath2)
-                self.saver.restore(self.backsess, ckpt2.model_checkpoint_path)
-
-                # TODO: 需要做新的数据处理，配合historyInputs
+                datas = self.textData.getAgentMessages(size=1)
                 if not self.args.historyInputs:
-                    datas = self.textData.getBatches(validate=len(self.trainingSamples))
-                    for data in tqdm(datas, desc="seq2seq"):
-                        assert len(data) == 2
-                        inputSeqs = data[0]
-                        targetSeqs = data[1]
-                        # Seq2Seq Model p(a|q)
-                        question = self.textData.sequence2str(inputSeqs, clean=True)
-                        questionSeq = []
-                        answer = self.singlePredict(question, questionSeq, rl=1)
-                        # Seq2Seq backward model p(q|a)
-                        backques = self.textData.sequence2str(targetSeqs, clean=True)
-                        backquesSeq = []
-                        origin = self.singlePredict(backques, backquesSeq, rl=2)
+
+                    for data in tqdm(datas, desc="Reinforcement Training"):
+                        paths = []
+
+                        observations = []
+                        actions = []
+                        rewards = []
+
+                        currentObserv = [Batch(), data]
+
+                        def recurcive(currentObservation, t):
+                            ops, feedDict = self.model.agentStep(currentObservation[1])
+
+                            assert len(ops) == 1
+
+                            actionP = [ops[0], feedDict]
+                            output = sess.run(ops[0], feedDict)
+                            py_ifx, seqences = self.textData.decoder2Nbest(output, self.args.mmiN)
+
+                            # answer = self.textData.deco2sentence(output)
+                            count = 0
+                            for answer in seqences:
+                                answerStr = self.textData.sequence2str(answer, clean=True)
+                                answerBatch = self.textData.sentence2enco(answerStr)
+                                action = [actionP, answerBatch]
+
+                                nextObservation = [currentObservation[1], answerBatch]
+
+                                reward = calculateReward(currentObservation[1], output, py_ifx[count], answer)
+
+                                count += 1
+                                observations.append(currentObservation)
+                                actions.append(action)
+                                rewards.append(reward)
+                                if t < self.args.maxTurns:
+                                    currentObservation = nextObservation
+                                    recurcive(currentObservation, t + 1)
+                                else:
+                                    returnReward = []
+                                    return_so_far = 0
+                                    for t in range(len(rewards) - 1, -1, -1):
+                                        return_so_far = rewards[t] + self.args.discount * return_so_far
+                                        returnReward.append(return_so_far)
+                                    # The returns are stored backwards in time, so we need to revert it
+                                    returnReward = returnReward[::-1]
+
+                                    # paths.append(dict(
+                                    #     observations=np.array(observations),
+                                    #     actions=np.array(actions),
+                                    #     rewards=np.array(rewards),
+                                    #     returns=np.array(returnReward)
+                                    # ))
+                                    paths.append(dict(
+                                        observations=observations,
+                                        actions=actions,
+                                        rewards=np.array(rewards),
+                                        returns=np.array(returnReward)
+                                    ))
+                                    observations.pop(len(observations)-1)
+                                    actions.pop(len(actions)-1)
+                                    rewards.pop(len(rewards)-1)
+                                    returnReward.pop(len(returnReward)-1)
+                            # observations.pop(len(observations) - 1)
+                            # actions.pop(len(actions) - 1)
+                            # rewards.pop(len(rewards) - 1)
+                            # returnReward.pop(len(returnReward) - 1)
+
+                        recurcive(currentObserv, t=1)
+
+
+
+                        '''
+                        定义returns_var tensor变量
+                        '''
+                        returns_var = tf.tensor('returns')
+                        '''
+                        初始化变量
+                        '''
+                        '''
+                        形成其feed变量以执行后面的run
+                        '''
+                        feedReturns_var = []
+                        # A=dist.log_likelihood_sym(actions_var, dist_info_vars)的含义：
+                        # 即在状态下采取动作序列actions的概率，这个概率是需要第二次使用model foreward计算的
+                        # 这一次foreward只需要定义每一次的forward操作，无需run，得到ops，里面的outputs即代表分布情况
+                        # 之后与returns_var进行乘法运算(tensor运算）
+                        # 需要记录每次forward的输入参数feedDict并形成整体feed变脸feedDictList
+                        A = 0
+                        feedDictList = []
+                        surr = - tf.mean(A * returns_var)
+                        self.model.mmiReward = surr
+                        op = self.model.agentStep(batch=None, terminate=True)
+                        sess.run(op, [feedDictList, feedReturns_var])
                 else:
                     datas = []
                 toc = datetime.datetime.now()
@@ -514,14 +613,34 @@ class Chatbot:
     def agentSimulation(self, sess, message):
         q = []
         p = []
-        candidates = self.historyPredict(message, nbest=True)
+        candidates = self.agentPredict(message, nbest=True)
         for i in range(self.args.maxTurns):
             p.append(candidates)
             qi = []
             for j in range(len(p[i])):
-                qi.append(self.historyPredict(p[i][j]), nbest=True)
+                qi.append(self.agentPredict(p[i][j]), nbest=True)
             q.append(qi)
+
         # TODO: calculate Rewards
+        def computeMI(decoCan, encoIn, mmiParams=None):
+            miscore = float()
+            return miscore
+
+        # TODO 1：直接继续定义lossfct2（应该说是改变里面的输入输出和weight参数指代，调用的可能还是tf.contrib.*）
+        # TODO 1: 这里encoderInputs也要根据其数据结构进行处理，提取出相对应的完成onebatch语句
+        i = 0
+        convReward = [(tf.reduce_mean(
+            computeMI(decoderCandidate, self.encoderInputs[i], self.mmiParams) for decoderCandidate in onebatch))
+                      for onebatch in self.decoder2Nbest(self.outputs, self.args.mmiN)]
+        # 一个batch的数据做一次综合Reward计算（类似上面的sequence loss吧虽然也不知道上面的sequence loss是不是这个意思）
+        self.mmiReward = tf.reduce_mean(convReward)
+        # TODO 1：修改summary的内容，summary应该是主要用于可视化的，具体作用不清楚，包括writer好像也是
+        # 看一下scalar函数能不能重复赋值，是覆盖还是添加，想一下如果可视化的话在不同mode下是不是直接覆盖就可以，在上面扩大了graph的
+        # 情况下，如果summary只添加一个loss function会不会不匹配而报错，或者直接先去掉可视化扩展相关的部分？
+
+    '''
+    测试相关函数
+    '''
 
     def predictTestset(self, sess):
         """ Try predicting the sentences from the samples.txt file.
@@ -549,8 +668,6 @@ class Chatbot:
             for sample in self.textData.testingSamples:
                 lines.append(self.textData.sequence2str(sample[0], clean=True))
                 hypseqs.append(self.textData.sequence2str(sample[1], clean=True))
-
-
 
         modelList = self._getModelList()
         if not modelList:
@@ -585,17 +702,20 @@ class Chatbot:
                                                                        self.textData.sequence2str(answer, clean=True),
                                                                        x=self.SENTENCES_PREFIX)
                     else:
-                        predString ='{x[0]}{0}\n{x[1]}{1}\n{y}{2}\n\n'.format(question,
-                                                                       self.textData.sequence2str(answer, clean=True),
-                                                                       hypseqs[index],
-                                                                       x=self.SENTENCES_PREFIX, y='T: ')
+                        predString = '{x[0]}{0}\n{x[1]}{1}\n{y}{2}\n\n'.format(question,
+                                                                               self.textData.sequence2str(answer,
+                                                                                                          clean=True),
+                                                                               hypseqs[index],
+                                                                               x=self.SENTENCES_PREFIX, y='T: ')
 
                         ref = nltk.word_tokenize(self.textData.sequence2str(answer, clean=True))
                         refs.append([ref])
                         hyp = nltk.word_tokenize(hypseqs[index])
                         hyps.append(hyp)
-                        bleu = bleu_score.sentence_bleu([ref], hyp, smoothing_function=bleu_score.SmoothingFunction().method2, weights=[0.3, 0.3, 0.2, 0.2])
-                        predString= predString+ ("Sentence BLEU %.4f\n\n" % (bleu))
+                        bleu = bleu_score.sentence_bleu([ref], hyp,
+                                                        smoothing_function=bleu_score.SmoothingFunction().method2,
+                                                        weights=[0.3, 0.3, 0.2, 0.2])
+                        predString = predString + ("Sentence BLEU %.4f\n\n" % (bleu))
 
                         average_bleu += bleu
 
@@ -604,7 +724,7 @@ class Chatbot:
                     f.write(predString)
                     index += 1
                 if flag:
-                    average_bleu /= (len(lines)-nbIgnored)
+                    average_bleu /= (len(lines) - nbIgnored)
                     corpus_bleu = bleu_score.corpus_bleu(refs, hyps,
                                                          smoothing_function=bleu_score.SmoothingFunction().method2,
                                                          weights=[0.3, 0.3, 0.2, 0.2])
@@ -645,38 +765,7 @@ class Chatbot:
 
             print()
 
-    def agentsTestInteractive(self, sess):
-        """ Try predicting the sentences that the user will enter in the console
-        Args:
-            sess: The current running session
-        """
-        # TODO 1: Implement agents test
-        # TODO : 在history训练出的模型下（包括强化训练过程中也是使用history的），interactive测试也需要处理出history信息，
-        # 并调用historyPredict，而不是singlePredict（默认load模型的historyInput参数为True）
-        print('Testing: Launch agent mode:')
-        print('')
-        print('Welcome to the agent interactive mode, here you can propose a question to Deep Q&A 2-Agents. Don\'t '
-              'have high expectation. Type \'exit\' or just press ENTER to quit the program. Have fun.')
-        while True:
-            question = input(self.SENTENCES_PREFIX[0])
-            if question == '' or question == 'exit':
-                break
-
-            questionSeq = []  # Will be contain the question as seen by the encoder
-            answer = self.historyPredict(question, questionSeq)
-            if not answer:
-                print('Warning: sentence too long, sorry. Maybe try a simpler sentence.')
-                continue  # Back to the beginning, try again
-
-            print('{}{}'.format(self.SENTENCES_PREFIX[1], self.textData.sequence2str(answer, clean=True)))
-
-            if self.args.verbose:
-                print(self.textData.batchSeq2str(questionSeq, clean=True, reverse=True))
-                print(self.textData.sequence2str(answer))
-
-            print()
-
-    def singlePredict(self, question, questionSeq=None, vld=False, rl=0):
+    def singlePredict(self, question, questionSeq=None, vld=False, rl=0, nbest=False):
         """ Predict the sentence
         Args:
             question (str): the raw input sentence
@@ -697,7 +786,6 @@ class Chatbot:
         if not vld and rl == 0:
             ops, feedDict = self.model.step(batch)
             output = self.sess.run(ops[0], feedDict)
-            print(output)
         elif vld:
             ckpt = tf.train.get_checkpoint_state(self.modelDir)
             self.saver.restore(self.vldsess, ckpt.model_checkpoint_path)
@@ -709,9 +797,14 @@ class Chatbot:
         elif rl == 2:
             ops, feedDict = self.backward.step(batch)
             output = self.backsess.run(ops[0], feedDict)
-        # print(ops[0])
-        # print(output)
-        answer = self.textData.deco2sentence(output)
+        if not nbest:
+            answer = self.textData.deco2sentence(output)
+        else:
+            candidates = self.textData.decoder2Nbest(decoderOuts=output, N=self.args.mmiN)
+            answer = []
+            for can in candidates:
+                answer.append(self.textData.deco2sentence(can))
+        # answer = self.textData.deco2sentence(output)
         return answer
 
     def daemonPredict(self, sentence):
@@ -729,7 +822,16 @@ class Chatbot:
             clean=True
         )
 
-    def historyPredict(self, question, questionSeq=None, vld=False, rl=0, nbest=False):
+    # def agentsTestInteractive(self, sess):
+
+    def daemonClose(self):
+        """ A utility function to close the daemon when finish
+        """
+        print('Exiting the daemon mode...')
+        self.sess.close()
+        print('Daemon closed.')
+
+    def agentPredict(self, question, questionSeq=None, vld=False, rl=0, nbest=False):
         """ Predict the sentence
         Args:
             question (str): the raw input sentence
@@ -766,32 +868,29 @@ class Chatbot:
         if not nbest:
             answer = self.textData.deco2sentence(output)
         else:
-            candidates = self.model.decoder2Nbest(decoderOuts=output, N=self.args.mmiN)
+            candidates = self.textData.decoder2Nbest(decoderOuts=output, N=self.args.mmiN)
             answer = []
             for can in candidates:
                 answer.append(self.textData.deco2sentence(can))
         return answer
 
-    def daemonClose(self):
-        """ A utility function to close the daemon when finish
-        """
-        print('Exiting the daemon mode...')
-        self.sess.close()
-        print('Daemon closed.')
+    # def evaluations(self):
+    #     """ An evaluation function to judge the performance of the model on test set
+    #     :return:
+    #         score: the quantized score of model performance
+    #     """
+    #     # TODO 1: Implement evaluations on test set
+    #     # BLEU score
+    #     # Perplexity
+    #     # Length of the dialogue->only use in agents performance evaluations
+    #     # Diversity:type-token ratio for unigrams and bigrams(seq2seq,rl->beam search(10),mutual information->n-best list(10) use only in testing)
+    #     # Human evaluation
+    #     score = 0
+    #     return score
 
-    def evaluations(self):
-        """ An evaluation function to judge the performance of the model on test set
-        :return:
-            score: the quantized score of model performance
-        """
-        # TODO 1: Implement evaluations on test set
-        # BLEU score
-        # Perplexity
-        # Length of the dialogue->only use in agents performance evaluations
-        # Diversity:type-token ratio for unigrams and bigrams(seq2seq,rl->beam search(10),mutual information->n-best list(10) use only in testing)
-        # Human evaluation
-        score = 0
-        return score
+    '''
+    辅助函数
+    '''
 
     def loadEmbedding(self, sess):
         """ Initialize embeddings with pre-trained word2vec vectors
@@ -877,9 +976,9 @@ class Chatbot:
                 print('Reset: Destroying previous model at {}'.format(self.modelDir))
             # Analysing directory content
             elif ckpt and tf.train.checkpoint_exists(
-                    ckpt.model_checkpoint_path) and modelName+'-'+str(self.globStep) == ckpt.model_checkpoint_path:
+                    ckpt.model_checkpoint_path) and modelName + '-' + str(self.globStep) == ckpt.model_checkpoint_path:
                 # os.path.exists(modelName):  # Restore the model
-                print('Restoring previous model from {}'.format(modelName+'-'+str(self.globStep)))
+                print('Restoring previous model from {}'.format(modelName + '-' + str(self.globStep)))
                 self.saver.restore(sess, ckpt.model_checkpoint_path)
                 # self.saver.restore(sess, modelName)
                 # Will crash when --reset is not activated and the model has not been saved yet
@@ -995,7 +1094,7 @@ class Chatbot:
             if not self.args.historyInputs:
                 self.args.maxLengthEnco = self.args.maxLength
             else:
-                self.args.maxLengthEnco = 2*self.args.maxLength
+                self.args.maxLengthEnco = 2 * self.args.maxLength
             self.args.maxLengthDeco = self.args.maxLength + 2
         else:
             self.args.maxLengthEnco = self.args.maxLength
@@ -1038,6 +1137,7 @@ class Chatbot:
         config['Training (won\'t be restored)']['mmiN'] = str(self.args.mmiN)
         config['Training (won\'t be restored)']['maxGradientNorm'] = str(self.args.maxGradientNorm)
         config['Training (won\'t be restored)']['maxTurns'] = str(self.args.maxTurns)
+        config['Training (won\'t be restored)']['discount'] = str(self.args.discount)
         config['Training (won\'t be restored)']['validate'] = str(self.args.validate)
 
         with open(os.path.join(self.modelDir, self.CONFIG_FILENAME), 'w') as configFile:

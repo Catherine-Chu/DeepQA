@@ -28,6 +28,8 @@ import os  # Checking file existance
 import random
 import string
 from collections import OrderedDict
+import numpy as np
+import heapq
 
 from chatbot.corpus.cornelldata import CornellData
 from chatbot.corpus.opensubsdata import OpensubsData
@@ -251,6 +253,23 @@ class TextData:
                 batch = samples[0]
             # batches包含所有数据，是batch的集合，依次训练即可，将batches训练完就遍历了一遍数据
             batches.append(batch)
+        return batches
+
+    def getAgentMessages(self, size=1):
+
+        self.shuffle()
+        batches = []
+
+        def genNextMessages():
+            """ Generator over the mini-batch training samples
+            """
+            for i in range(0, self.getSampleSize()[0], size):
+                yield self.trainingSamples[i:min(i + size, self.getSampleSize()[0])]
+
+        for samples in genNextMessages():
+            batch = self._createBatch(samples)
+            batches.append(batch)
+
         return batches
 
     def getSampleSize(self):
@@ -637,6 +656,80 @@ class TextData:
             print('A: {}'.format(self.sequence2str(self.trainingSamples[idSample][1], clean=True)))
             print()
         pass
+
+    def decoder2Nbest(self, decoderOuts, N, fore2back=False):
+        """Decode the output of the decoder and return a human friendly sentence
+                decoderOutputs (list<np.array>):代表一句(fore2back=true)或多句输出各个单词组成的list，
+                list中每个元素是一个(fore2back=true)或多个np.array，代表该预测位置在整个词表中的每个词可能出现的概率
+        """
+
+        def step(decoderOutputs):
+            sequences = []
+            n_best_w = []
+            n_best_logit = []
+            for out in decoderOutputs:
+                n_best_w.append(heapq.nlargest(N, range(len(out)), out.take))
+                # n_best_logit.append([out[x] for x in n_best_w[len(n_best_w) - 1]])
+                n_best_logit.append(heapq.nlargest(N, out))
+
+            # print(n_best_logit)
+            logits = [1]
+            paths = [list()]
+            pos = 0
+            for candidate_words in n_best_logit:
+                logits1 = []
+                paths1 = []
+                for ws in range(len(candidate_words)):
+                    for mul in range(len(logits)):
+                        logits1.append(candidate_words[ws] * logits[mul])
+                        a = []
+                        a.extend(paths[mul])
+                        a.append(n_best_w[pos][ws])
+                        paths1.append(a)
+                        # a.clear()
+                logits.clear()
+                paths.clear()
+                if len(logits1) > 5000:
+                    k1 = heapq.nlargest(5000, range(len(logits1)), np.array(logits1).take)
+                    for ti in k1:
+                        logits.append(logits1[ti])
+                        paths.append(paths1[ti])
+                else:
+                    logits.extend(logits1)
+                    paths.extend(paths1)
+                logits1.clear()
+                paths1.clear()
+                pos += 1
+            k = heapq.nlargest(N, range(len(logits)), np.array(logits).take)
+            logitsseqs = heapq.nlargest(N, logits)
+            for t in k:
+                sequences.append(paths[t])
+            return logitsseqs, sequences
+
+        batchSeqs = []
+        Py_ifx = []
+        if not fore2back:
+            decoderOuts = self.splitOutBatches(decoderOuts)
+            for decoderOutputs in decoderOuts:
+                logitsseqs, sequences = step(decoderOutputs)
+                Py_ifx.append(logitsseqs)
+                batchSeqs.append(sequences)
+        else:
+            logitsseqs, sequences = step(decoderOuts)
+            Py_ifx.extend(logitsseqs)
+            batchSeqs.extend(sequences)
+        return Py_ifx, batchSeqs
+
+    def splitOutBatches(self, decoderOuts):
+        seqs = []
+        w = 0
+        for eachwords in decoderOuts:
+            for eachone in range(self.args.batchSize):
+                if w == 0:
+                    seqs.append([])
+                seqs[eachone].append(np.array(eachwords[eachone]))
+            w += 1
+        return seqs
 
 
 def tqdm_wrap(iterable, *args, **kwargs):
