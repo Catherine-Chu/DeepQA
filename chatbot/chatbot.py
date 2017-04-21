@@ -37,7 +37,10 @@ from nltk.translate import bleu_score
 from chatbot.textdata import TextData
 from chatbot.model import Model
 from nltk.translate import bleu_score
+
 from chatbot.textdata import Batch
+from nltk.translate import gleu_score
+
 
 
 class Chatbot:
@@ -659,6 +662,14 @@ class Chatbot:
         refs = []
         hyps = []
         average_bleu = 0
+        average_gleu = 0
+        average_uni_ratio = 0
+        average_bi_ratio = 0
+        total_token = 0
+        uni_dict = {}
+        bi_dict = {}
+        av_total_uni_ratio = 0.0
+        av_total_bi_ratio = 0.0
         flag = self.textData.loadTestData(self.textData.testSamplesDir)
         if not flag:
             # Loading the file to predict
@@ -712,12 +723,55 @@ class Chatbot:
                         refs.append([ref])
                         hyp = nltk.word_tokenize(hypseqs[index])
                         hyps.append(hyp)
+
+                        tokens = len(ref)
+                        total_token += tokens
+                        dic1 = {k: ref.count(k) for k in set(ref)}
+                        uni_types = len(dic1)
+                        dic2 = {}
+                        for i in range(len(ref) - 1):
+                            item = ref[i] + ' ' + ref[i + 1]
+                            if item in dic2.keys():
+                                dic2[item] += 1
+                            else:
+                                dic2[item] = 1
+                        bi_types = len(dic2)
+                        if tokens > 0:
+                            uni_ratio = float(uni_types) / float(tokens)
+                            bi_ratio = float(bi_types) / float(tokens)
+                        else:
+                            uni_ratio = 0
+                            bi_ratio = 0
+                        for it1 in dic1.keys():
+                            if it1 in uni_dict.keys():
+                                uni_dict[it1] += 1
+                            else:
+                                uni_dict[it1] = 1
+                        for it2 in dic2.keys():
+                            if it2 in bi_dict.keys():
+                                bi_dict[it2] += 1
+                            else:
+                                bi_dict[it2] = 1
+
+                        # bleu = bleu_score.sentence_bleu([ref], hyp, smoothing_function=bleu_score.SmoothingFunction().method2, weights=[0.3, 0.3, 0.2, 0.2])
                         bleu = bleu_score.sentence_bleu([ref], hyp,
-                                                        smoothing_function=bleu_score.SmoothingFunction().method2,
-                                                        weights=[0.3, 0.3, 0.2, 0.2])
-                        predString = predString + ("Sentence BLEU %.4f\n\n" % (bleu))
+                                                        smoothing_function=bleu_score.SmoothingFunction().method2)
+                        try:
+                            gleu = gleu_score.sentence_gleu(ref, hyp)
+                        except (ZeroDivisionError):
+                            print("Error: Division by zero, need smoothing function.")
+                            gleu = 0.0
+                        predString = predString + ("Sentence BLEU %.4f, Sentence Google-BlEU %.4f.\n"
+                                                   "Unigram diversity %.4f, Bigram diversity %.4f.\n\n" % (
+                                                       bleu, gleu, uni_ratio, bi_ratio))
 
                         average_bleu += bleu
+                        average_gleu += gleu
+                        average_bi_ratio += bi_ratio
+                        average_uni_ratio += uni_ratio
+
+                        av_total_uni_ratio = float(len(uni_dict)) / float(total_token)
+                        av_total_bi_ratio = float(len(bi_dict)) / float(total_token)
 
                     if self.args.verbose:
                         tqdm.write(predString)
@@ -725,10 +779,19 @@ class Chatbot:
                     index += 1
                 if flag:
                     average_bleu /= (len(lines) - nbIgnored)
+                    average_gleu /= (len(lines) - nbIgnored)
+                    average_uni_ratio /= (len(lines) - nbIgnored)
+                    average_bi_ratio /= (len(lines) - nbIgnored)
+                    # corpus_bleu = bleu_score.corpus_bleu(refs, hyps,
+                    #                                      smoothing_function=bleu_score.SmoothingFunction().method2,
+                    #                                      weights=[0.3, 0.3, 0.2, 0.2])
                     corpus_bleu = bleu_score.corpus_bleu(refs, hyps,
-                                                         smoothing_function=bleu_score.SmoothingFunction().method2,
-                                                         weights=[0.3, 0.3, 0.2, 0.2])
-                    f.write("Average BLEU %.4f, Corpus BLEU %.4f.\n" % (average_bleu, corpus_bleu))
+                                                         smoothing_function=bleu_score.SmoothingFunction().method2)
+                    f.write("Average BLEU %.4f, Average Google-BLEU %.4f, Corpus BLEU %.4f.\n"
+                            "Average Unigram diversity %.4f, Average Bigram diversity %.4f.\n"
+                            "Average T-Unigram diversity %.4f, Average T-Bigram diversity %.4f." % (
+                                average_bleu, average_gleu, corpus_bleu, average_uni_ratio, average_bi_ratio,
+                                av_total_uni_ratio, av_total_bi_ratio))
                 print('Prediction finished, {}/{} sentences ignored (too long)'.format(nbIgnored, len(lines)))
 
     def mainTestInteractive(self, sess):
