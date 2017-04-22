@@ -371,9 +371,11 @@ class Chatbot:
                         bi_types = len(dic2)
                         if tokens > 0:
                             uni_ratio = float(uni_types) / float(tokens)
-                            bi_ratio = float(bi_types) / float(tokens)
                         else:
                             uni_ratio = 0
+                        if tokens > 1:
+                            bi_ratio = float(bi_types) / float(tokens-1)
+                        else:
                             bi_ratio = 0
                         for it1 in dic1.keys():
                             if it1 in uni_dict.keys():
@@ -403,8 +405,6 @@ class Chatbot:
                         average_bi_ratio += bi_ratio
                         average_uni_ratio += uni_ratio
 
-                        av_total_uni_ratio = float(len(uni_dict)) / float(total_token)
-                        av_total_bi_ratio = float(len(bi_dict)) / float(total_token)
 
                     if self.args.verbose:
                         tqdm.write(predString)
@@ -415,6 +415,9 @@ class Chatbot:
                     average_gleu /= (len(lines) - nbIgnored)
                     average_uni_ratio /= (len(lines) - nbIgnored)
                     average_bi_ratio /= (len(lines) - nbIgnored)
+
+                    av_total_uni_ratio = float(len(uni_dict)) / float(total_token)
+                    av_total_bi_ratio = float(len(bi_dict)) / float(total_token - len(lines) + nbIgnored)
                     # corpus_bleu = bleu_score.corpus_bleu(refs, hyps,
                     #                                      smoothing_function=bleu_score.SmoothingFunction().method2,
                     #                                      weights=[0.3, 0.3, 0.2, 0.2])
